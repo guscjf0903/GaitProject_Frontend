@@ -1,0 +1,56 @@
+@import "tailwindcss";
+
+/* Make full-height layouts reliable */
+html,
+body,
+#app {
+  height: 100%;
+}
+
+/* ✅ Theme via CSS variables (easy dark/light toggle) */
+:root {
+  --bg: #F9FAFB;
+  --sidebar: #FFFFFF;
+  --border: #E5E7EB;
+  --text: #111827;
+  --muted: #6B7280;
+  --itemHover: #F3F4F6;
+  --chip: rgba(17, 24, 39, 0.04);
+  --chipBorder: rgba(17, 24, 39, 0.10);
+  --shadow: rgba(0,0,0,0.08);
+  --scrollThumb: #C7C7C7;
+}
+
+html.dark {
+  --bg: #1E1E1E;
+  --sidebar: #252526;
+  --border: #3E3E42;
+  --text: #E0E0E0;
+  --muted: #9CA3AF;
+  --itemHover: #2D2D30;
+  --chip: rgba(255, 255, 255, 0.05);
+  --chipBorder: rgba(255, 255, 255, 0.10);
+  --shadow: rgba(0,0,0,0.35);
+  --scrollThumb: #424242;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--scrollThumb); border-radius: 3px; }
+
+.graph-path {
+  stroke-dasharray: 1000;
+  stroke-dashoffset: 1000;
+  animation: dash 0.9s ease-out forwards;
+  pointer-events: none;
+}
+@keyframes dash { to { stroke-dashoffset: 0; } }
+
+.node-pop { animation: pop 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+@keyframes pop { from { r: 0; } to { r: 4.5; } }
+
+.fade-in { animation: fadeIn 0.18s ease-out both; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(4px);} to { opacity: 1; transform: translateY(0);} }
+
+/* Prevent textarea enter sending in IME composition */
+textarea { ime-mode: auto; }
