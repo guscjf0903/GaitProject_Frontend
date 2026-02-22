@@ -19,5 +19,9 @@ export type BranchCreateRequest = {
      * 기본 브랜치 여부
      */
     isDefault: boolean;
+    /**
+     * 브랜치 시작 기준 커밋 ID(선택)
+     */
+    baseCommitId?: string | null;
 };
 

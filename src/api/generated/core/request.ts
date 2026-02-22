@@ -298,6 +298,18 @@ export const request = <T>(config: OpenAPIConfig, options: ApiRequestOptions): C
             const body = getRequestBody(options);
             const headers = await getHeaders(config, options);
 
+            // Safety net (dev-friendly):
+            // If OpenAPI.TOKEN/HEADERS isn't initialized for any reason, still attach JWT from localStorage.
+            // This prevents confusing 403s during local testing.
+            try {
+                if (typeof window !== 'undefined' && !headers.has('Authorization')) {
+                    const token = window.localStorage?.getItem('gait_access_token');
+                    if (token) headers.set('Authorization', `Bearer ${token}`);
+                }
+            } catch {
+                // ignore
+            }
+
             if (!onCancel.isCancelled) {
                 const response = await sendRequest(config, options, url, body, formData, headers, onCancel);
                 const responseBody = await getResponseBody(response);

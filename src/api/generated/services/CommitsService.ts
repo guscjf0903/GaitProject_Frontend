@@ -9,6 +9,32 @@ import { OpenAPI } from '../core/OpenAPI';
 import { request as __request } from '../core/request';
 export class CommitsService {
     /**
+     * 브랜치 커밋 목록
+     * @param workspaceId
+     * @param branchId
+     * @param limit
+     * @returns any OK
+     * @throws ApiError
+     */
+    public static list4(
+        workspaceId: string,
+        branchId: string,
+        limit: number = 200,
+    ): CancelablePromise<any> {
+        return __request(OpenAPI, {
+            method: 'GET',
+            url: '/api/workspaces/{workspaceId}/branches/{branchId}/commits',
+            path: {
+                'workspaceId': workspaceId,
+                'branchId': branchId,
+            },
+            query: {
+                'limit': limit,
+            },
+        });
+    }
+
+    /**
      * 커밋 생성
      * 브랜치의 최근 메시지를 커밋에 부착하고, 커밋 요약 정보를 저장합니다(서비스 구현에 따름).
      * @param workspaceId

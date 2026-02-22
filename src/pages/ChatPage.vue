@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { MessagesService } from '../api/generated'
+import { BranchesService, CommitsService, MessagesService, OpenAPI } from '../api/generated'
 import { useAuthStore } from '../stores/auth'
 import { streamChatSse } from '../api/sseChatStream'
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 
 const props = defineProps<{ workspaceId: string; branchId: string }>()
 const auth = useAuthStore()
+const router = useRouter()
 
 // Layout constants (same as design)
 const ROW_HEIGHT = 60
@@ -28,20 +30,92 @@ const toggleTheme = () => {
 
 // State
 const input = ref('')
+const streaming = ref(false)
+let streamAbort: AbortController | null = null
+const loadingTimeline = ref(false)
+const loadingCommitId = ref<string | null>(null)
+const committing = ref(false)
+let timelineSeq = 0
+const pendingCheckoutCommitId = ref<string | null>(null)
+const latestLoadedBranchId = ref<string | null>(null)
+const highlightedCommitId = ref<string | null>(null)
+const forkMenuCommitId = ref<string | null>(null)
+let highlightTimer: ReturnType<typeof setTimeout> | null = null
 const activeBranch = ref('main')
-const currentHead = ref('h6i7j')
+const currentHead = ref('')
+const serverHeadCommitId = ref<string | null>(null)
+const branchList = ref<Array<{ id: string; name: string; baseCommitId?: string | null; headCommitId?: string | null }>>([])
 
 // Commits (Oldest -> Newest)
-const commits = ref([
-  { hash: 'h6i7j', parentId: null as string | null, branch: 'main', msg: 'Initial Commit', time: 'Yesterday', col: 0 },
-  { hash: 'e4f5g', parentId: 'h6i7j', branch: 'main', msg: 'Init Project', time: '1h ago', col: 0 },
-])
+const commits = ref<
+  Array<{ hash: string; parentId: string | null; branch: string; branchId?: string; msg: string; time: string; col: number }>
+>([])
+
+const commitByHashMap = computed(() => {
+  const map: Record<string, { hash: string; parentId: string | null; branch: string; branchId?: string; msg: string; time: string; col: number }> = {}
+  commits.value.forEach((c) => {
+    map[c.hash] = c
+  })
+  return map
+})
+
+const selectedLineageSet = computed(() => {
+  const set = new Set<string>()
+  const seen = new Set<string>()
+  let cur = currentHead.value
+  while (cur && !seen.has(cur)) {
+    set.add(cur)
+    seen.add(cur)
+    cur = commitByHashMap.value[cur]?.parentId ?? ''
+  }
+  return set
+})
+
+const branchLineageFromHead = computed(() => {
+  const head = serverHeadCommitId.value
+  if (!head) return [] as string[]
+  const rev: string[] = []
+  const seen = new Set<string>()
+  let cur = head
+  while (cur && !seen.has(cur)) {
+    rev.push(cur)
+    seen.add(cur)
+    cur = commitByHashMap.value[cur]?.parentId ?? ''
+  }
+  return rev.reverse()
+})
+
+const branchOrderMap = computed(() => {
+  const map: Record<string, number> = {}
+  branchLineageFromHead.value.forEach((hash, idx) => {
+    map[hash] = idx
+  })
+  return map
+})
+
+const currentBranchHeadLineageSet = computed(() => new Set(branchLineageFromHead.value))
+
+const selectedOrder = computed(() => {
+  const head = serverHeadCommitId.value
+  if (!head) return -1
+  const current = currentHead.value
+  const map = branchOrderMap.value
+  if (typeof map[current] === 'number') return map[current]
+  return typeof map[head] === 'number' ? map[head] : -1
+})
+
+const headOrder = computed(() => {
+  const head = serverHeadCommitId.value
+  if (!head) return -1
+  const map = branchOrderMap.value
+  return typeof map[head] === 'number' ? map[head] : -1
+})
 
 // Messages shown for current HEAD (time-travel will restore snapshots)
 type ChatMsg =
-  | { type?: undefined; role: 'user' | 'ai'; text: string; model?: string }
-  | { type: 'commit'; hash: string; text: string }
-const messages = ref<ChatMsg[]>([{ role: 'ai', text: 'Ready to work on [main].', model: 'System' }])
+  | { type: 'message'; role: 'user' | 'ai'; text: string; model?: string; messageId?: string; commitId?: string | null; sequence?: number }
+  | { type: 'commit'; hash: string; text: string; isWorkingTree?: boolean }
+const messages = ref<ChatMsg[]>([{ type: 'message', role: 'ai', text: 'Ready to work on [main].', model: 'System' }])
 
 // ✅ Snapshot store (hash -> messages snapshot)
 const snapshots = reactive<Record<string, ChatMsg[]>>({})
@@ -84,13 +158,14 @@ const graphNodes = computed(() =>
     x: START_X + c.col * COL_WIDTH,
     y: idx * ROW_HEIGHT + ROW_HEIGHT / 2,
     color: getBranchColor(c.branch),
+    isActive: selectedLineageSet.value.has(c.hash),
   })),
 )
 
 const containerHeight = computed(() => commits.value.length * ROW_HEIGHT)
 
 const graphPaths = computed(() => {
-  const paths: Array<{ d: string; color: string }> = []
+  const paths: Array<{ d: string; color: string; isActive: boolean }> = []
   const nodesMap: Record<string, { x: number; y: number; color: string }> = {}
   graphNodes.value.forEach((n) => (nodesMap[n.hash] = n))
 
@@ -112,20 +187,19 @@ const graphPaths = computed(() => {
     if (startX === endX) d += `L ${endX} ${endY}`
     else d += `C ${startX} ${cp1y}, ${endX} ${cp2y}, ${endX} ${endY}`
 
-    paths.push({ d, color: getBranchColor(commit.branch) })
+    const isActive = !!commit.parentId && selectedLineageSet.value.has(commit.hash) && selectedLineageSet.value.has(commit.parentId)
+    paths.push({ d, color: getBranchColor(commit.branch), isActive })
   })
 
   return paths
 })
 
 // Detached HEAD detection (HEAD is not tip of current branch)
-const branchTips = computed(() => {
-  const tips: Record<string, string> = {}
-  commits.value.forEach((c) => (tips[c.branch] = c.hash))
-  return tips
+// commit 배열 순서에 의존하면 refresh/append 시 꼬일 수 있어, 서버가 주는 headCommitId 기준으로 판단합니다.
+const isDetached = computed(() => {
+  if (!serverHeadCommitId.value) return false
+  return serverHeadCommitId.value !== currentHead.value
 })
-
-const isDetached = computed(() => branchTips.value[activeBranch.value] !== currentHead.value)
 
 // --- Utils ---
 const scrollToBottom = (id: string) => {
@@ -146,12 +220,6 @@ const scrollToCommitInSidebar = (hash: string) => {
   })
 }
 
-const genHash = () => {
-  const arr = crypto.getRandomValues(new Uint32Array(1))
-  const n = arr[0] ?? 0
-  return n.toString(16).slice(0, 5)
-}
-
 const nowLabel = () => {
   const d = new Date()
   const hh = String(d.getHours()).padStart(2, '0')
@@ -167,52 +235,327 @@ const normalizeBranchName = (name: string) => {
     .replace(/\/+/, '/')
 }
 
+const isUuid = (v: string) =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)
+
+const toUiRole = (role: string) => (role === 'USER' ? 'user' : 'ai')
+
+const shortHash = (hash: string) => String(hash || '').slice(0, 8)
+
+const commitLabel = (commitId: string) => {
+  const commit = commits.value.find((c) => c.hash === commitId)
+  const title = String(commit?.msg ?? 'COMMIT')
+  return `${title} (${shortHash(commitId)})`
+}
+
+const getForkBranches = (commitHash: string) => {
+  const ownerBranchId = commitByHashMap.value[commitHash]?.branchId
+  return branchList.value
+    .filter((b) => !!b.baseCommitId && b.baseCommitId === commitHash && b.id !== ownerBranchId)
+    .map((b) => ({ id: b.id, name: b.name }))
+}
+
+const hasFork = (commitHash: string) => getForkBranches(commitHash).length > 0
+
+const forkLabel = (commitHash: string) => {
+  const n = getForkBranches(commitHash).length
+  return n > 0 ? `+${n} branches` : ''
+}
+
+const forkTooltip = (commitHash: string) => getForkBranches(commitHash).map((b) => b.name).join(', ')
+
+const toggleForkMenu = (commitHash: string) => {
+  forkMenuCommitId.value = forkMenuCommitId.value === commitHash ? null : commitHash
+}
+
+const checkoutBranchById = async (branchId: string) => {
+  forkMenuCommitId.value = null
+  await router.push(`/w/${props.workspaceId}/b/${branchId}`)
+}
+
+const isFutureMessage = (msg: ChatMsg) => {
+  // HEAD를 보고 있으면 미래 메시지는 없음
+  if (!serverHeadCommitId.value || selectedOrder.value >= headOrder.value) return false
+
+  if (msg.type === 'commit') {
+    if (msg.isWorkingTree) return true
+    const idx = branchOrderMap.value[msg.hash]
+    return typeof idx === 'number' ? idx > selectedOrder.value : false
+  }
+
+  if (msg.commitId) {
+    const idx = branchOrderMap.value[msg.commitId]
+    return typeof idx === 'number' ? idx > selectedOrder.value : false
+  }
+
+  // 미커밋 메시지는 과거 커밋을 보고 있을 때 "미래"로 처리
+  return true
+}
+
+const focusCommitInChat = (commitHash: string) => {
+  nextTick(() => {
+    const divider = document.querySelector(`[data-commit-divider="${commitHash}"]`) as HTMLElement | null
+    const fallback = document.querySelector(`[data-msg-commit="${commitHash}"]`) as HTMLElement | null
+    const target = divider ?? fallback
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      highlightedCommitId.value = commitHash
+      if (highlightTimer) clearTimeout(highlightTimer)
+      highlightTimer = setTimeout(() => {
+        highlightedCommitId.value = null
+      }, 1400)
+    }
+  })
+}
+
+const buildTimelineRows = (committedRaw: any[], pendingRaw: any[]): ChatMsg[] => {
+  const rows: ChatMsg[] = []
+  let lastCommitId: string | null = null
+
+  for (const m of committedRaw) {
+    const commitId = m?.commitId ? String(m.commitId) : null
+    if (commitId && commitId !== lastCommitId) {
+      rows.push({
+        type: 'commit',
+        hash: commitId,
+        text: commitLabel(commitId),
+      })
+      lastCommitId = commitId
+    }
+    rows.push({
+      type: 'message',
+      role: toUiRole(String(m?.role ?? 'ASSISTANT')),
+      text: String(m?.content ?? ''),
+      messageId: m?.id ? String(m.id) : undefined,
+      commitId,
+      sequence: typeof m?.sequence === 'number' ? m.sequence : undefined,
+    })
+  }
+
+  const pending = (pendingRaw ?? []).filter((m: any) => !m?.commitId)
+  if (pending.length > 0) {
+    rows.push({
+      type: 'commit',
+      hash: 'WORKING_TREE',
+      text: 'WORKING TREE (uncommitted)',
+      isWorkingTree: true,
+    })
+    for (const m of pending) {
+      rows.push({
+        type: 'message',
+        role: toUiRole(String(m?.role ?? 'ASSISTANT')),
+        text: String(m?.content ?? ''),
+        messageId: m?.id ? String(m.id) : undefined,
+        commitId: null,
+        sequence: typeof m?.sequence === 'number' ? m.sequence : undefined,
+      })
+    }
+  }
+
+  return rows
+}
+
+const saveCurrentHeadSnapshot = () => {
+  if (!currentHead.value) return
+  snapshots[currentHead.value] = deepCopy(messages.value) as ChatMsg[]
+}
+
+const appendCommitToGraph = (newHash: string, parentHash: string | null, message: string, branchName: string, branchId?: string) => {
+  const headCommit = commits.value.find((c) => c.hash === parentHash) ?? commits.value[commits.value.length - 1]
+
+  commits.value.push({
+    hash: newHash,
+    parentId: parentHash || null,
+    branch: branchName,
+    branchId: branchId || props.branchId,
+    msg: message,
+    time: nowLabel(),
+    col: headCommit?.col ?? 0,
+  })
+
+  messages.value.push({ type: 'commit', hash: newHash, text: message })
+  snapshots[newHash] = deepCopy(messages.value) as ChatMsg[]
+  currentHead.value = newHash
+}
+
+const createCommitOnServer = async (
+  keyPoint: string,
+  options: { silent?: boolean; closeModal?: boolean } = {},
+): Promise<string> => {
+  const res = await CommitsService.create3(
+    props.workspaceId,
+    props.branchId,
+    {
+      workspaceId: props.workspaceId,
+      branchId: props.branchId,
+      keyPoint,
+      shortSummary: null,
+      longSummary: null,
+    },
+    auth.userId ?? undefined,
+  )
+
+  const created = res.data?.commit
+  const newHash = created?.id
+  if (!newHash) throw new Error('commit id missing')
+
+  const parentHash = created?.parentId ?? currentHead.value
+  const finalMsg = created?.keyPoint || keyPoint
+  appendCommitToGraph(newHash, parentHash || null, finalMsg, activeBranch.value, props.branchId)
+  // 커밋 직후에는 서버 HEAD도 이 커밋으로 이동한 것이므로 즉시 반영(HEAD 판별 흔들림 방지)
+  serverHeadCommitId.value = newHash
+
+  if (options.closeModal) commitModal.open = false
+  if (!options.silent) {
+    toastNow('Committed', `[${newHash.slice(0, 8)}] ${finalMsg}`)
+  }
+  scrollToBottom('chat-box')
+  scrollToCommitInSidebar(newHash)
+  return newHash
+}
+
+const getPendingMessageCount = async (): Promise<number> => {
+  const res = await MessagesService.timelineAfter(props.workspaceId, props.branchId, 0, 200)
+  const list = (res.data ?? []) as Array<{ commitId?: string | null }>
+  return list.filter((m) => !m.commitId).length
+}
+
+const refreshCurrentBranchCommits = async (branchId: string = props.branchId) => {
+  try {
+    // 현재 브랜치 커밋 목록을 다시 받아서, 새로 생긴 커밋(자동 커밋 포함)을 그래프에 반영
+    const branchRes = await BranchesService.listByWorkspace(props.workspaceId)
+    const currentBranch = (branchRes.data ?? []).find((b: any) => b.id === branchId)
+    if (!currentBranch) return
+    if (branchId === props.branchId) {
+      serverHeadCommitId.value = (currentBranch.headCommitId as string | undefined) ?? null
+    }
+
+    const listRes = await CommitsService.list4(props.workspaceId, branchId, 300)
+    const serverCommits = ((listRes?.data ?? []) as Array<any>).slice().reverse()
+    if (serverCommits.length === 0) return
+
+    const existing = new Set(commits.value.map((c) => c.hash))
+    for (const c of serverCommits) {
+      const id = c?.id ? String(c.id) : ''
+      if (!id || existing.has(id)) continue
+      commits.value.push({
+        hash: id,
+        parentId: c.parentId ? String(c.parentId) : null,
+        branch: String(currentBranch.name ?? activeBranch.value ?? 'main'),
+        branchId,
+        msg: String(c.keyPoint ?? 'COMMIT'),
+        time: c.createdAt ? new Date(c.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
+        col: 0,
+      })
+      existing.add(id)
+    }
+  } catch {
+    // ignore (best-effort refresh)
+  }
+}
+
 // --- Actions ---
 const send = async () => {
   if (!input.value.trim()) return
+
+  // props가 라우트 전환 등으로 바뀌어도 "이 send"는 같은 브랜치에 저장되도록 고정
+  const workspaceId = props.workspaceId
+  const branchId = props.branchId
+  const contextCommitId = isDetached.value && isUuid(currentHead.value) ? currentHead.value : null
+
   const content = input.value
-  messages.value.push({ role: 'user', text: content })
+  messages.value.push({ type: 'message', role: 'user', text: content, commitId: null })
+  saveCurrentHeadSnapshot()
   input.value = ''
   scrollToBottom('chat-box')
 
   // Persist user message (best-effort)
   try {
-    await MessagesService.send(props.workspaceId, props.branchId, {
-      workspaceId: null,
-      branchId: null,
+    await MessagesService.send(workspaceId, branchId, {
+      // backend DTO validates these as not-null (even though it's also in path)
+      workspaceId,
+      branchId,
       userId: auth.userId ?? null,
       role: 'USER',
       content,
       metadata: null,
     })
-  } catch {
-    // ignore for MVP
+  } catch (e: any) {
+    // 서버 저장 실패하면, 나중에 커밋 이동/새로고침 시 사라질 수 있으니 즉시 알려줍니다.
+    toastNow('Message', e?.message ?? '메시지 저장 실패(서버). 새로고침/이동 시 사라질 수 있어요.', 2200)
+  } finally {
+    // auto-commit은 user message 저장 시점에 발생할 수 있으므로, 커밋 목록을 즉시 동기화
+    await refreshCurrentBranchCommits(branchId)
   }
 
   // Start streaming AI answer (POST + event-stream)
   let aiIndex = messages.value.length
-  messages.value.push({ role: 'ai', text: '' })
+  messages.value.push({ type: 'message', role: 'ai', text: '', commitId: null })
 
-  const url = `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'}/api/chat/stream`
-  await streamChatSse({
-    url,
-    token: auth.accessToken,
-    body: { workspaceId: props.workspaceId, branchId: props.branchId, content },
-    handlers: {
-      onChunk: (raw) => {
-        // backend: ApiResponse.ok(SseEvent(type, data))
-        const chunk = raw?.data?.data?.chunk
-        if (typeof chunk === 'string') {
-          const msg = messages.value[aiIndex] as any
-          if (msg && msg.role === 'ai') msg.text += chunk
+  const url = `${OpenAPI.BASE || 'http://localhost:8080'}/api/chat/stream`
+  try {
+    // abort any previous stream
+    streamAbort?.abort()
+    streamAbort = new AbortController()
+    streaming.value = true
+
+    await streamChatSse({
+      url,
+      // NOTE: OpenAPI client는 configureApi()에서 localStorage 기반 토큰을 사용하지만,
+      // SSE는 별도 fetch이므로 명시적으로 localStorage에서 읽어줍니다.
+      token: localStorage.getItem('gait_access_token'),
+      signal: streamAbort.signal,
+      body: {
+        workspaceId,
+        branchId,
+        contextCommitId,
+        content,
+      },
+      handlers: {
+        onChunk: (raw) => {
+          // backend: ApiResponse.ok(SseEvent(type, data))
+          const chunk = raw?.data?.data?.chunk
+          if (typeof chunk === 'string') {
+            const msg = messages.value[aiIndex] as any
+            if (msg && msg.role === 'ai') msg.text += chunk
+            scrollToBottom('chat-box')
+          }
+        },
+        onDone: () => {
+          streaming.value = false
+          streamAbort = null
+          saveCurrentHeadSnapshot()
           scrollToBottom('chat-box')
-        }
+
+          // Persist assistant message (best-effort)
+          ;(async () => {
+            try {
+              const msg = messages.value[aiIndex] as any
+              const text = msg?.role === 'ai' ? String(msg.text ?? '') : ''
+              if (!text) return
+              await MessagesService.send(workspaceId, branchId, {
+                workspaceId,
+                branchId,
+                role: 'ASSISTANT',
+                content: text,
+                metadata: null,
+              })
+            } catch (e: any) {
+              toastNow('Message', e?.message ?? 'AI 메시지 저장 실패(서버). 새로고침/이동 시 사라질 수 있어요.', 2200)
+            } finally {
+              // assistant 저장 이후에도 auto-commit/commit 반영이 늦게 들어올 수 있어 한번 더 동기화
+              await refreshCurrentBranchCommits(branchId)
+            }
+          })()
+        },
       },
-      onDone: () => {
-        scrollToBottom('chat-box')
-      },
-    },
-  })
+    })
+  } catch (e: any) {
+    streaming.value = false
+    streamAbort = null
+    const msg = e?.name === 'AbortError' ? '응답 스트리밍을 중단했어요.' : (e?.message ?? 'SSE 스트리밍 실패')
+    toastNow('Stream', msg)
+  }
 }
 
 const onInputKeydown = (e: KeyboardEvent & { isComposing?: boolean }) => {
@@ -257,35 +600,23 @@ const openBranchModal = () => {
 const closeBranchModal = () => (branchModal.open = false)
 
 const confirmCommit = () => {
+  if (committing.value) return
   const msg = (commitModal.message || '').trim()
   if (!msg) {
     toastNow('Commit', '커밋 메시지를 입력해줘')
     return
   }
 
-  const headCommit = commits.value.find((c) => c.hash === currentHead.value)
-  if (!headCommit) return
-
-  const newHash = genHash()
-
-  commits.value.push({
-    hash: newHash,
-    parentId: currentHead.value,
-    branch: activeBranch.value,
-    msg,
-    time: nowLabel(),
-    col: headCommit.col,
-  })
-
-  messages.value.push({ type: 'commit', hash: newHash, text: msg })
-  snapshots[newHash] = deepCopy(messages.value)
-
-  currentHead.value = newHash
-  commitModal.open = false
-
-  toastNow('Committed', `[${newHash}] ${msg}`)
-  scrollToBottom('chat-box')
-  scrollToCommitInSidebar(newHash)
+  ;(async () => {
+    try {
+      committing.value = true
+      await createCommitOnServer(msg, { closeModal: true })
+    } catch (e: any) {
+      toastNow('Commit', e?.message ?? '커밋 생성 실패')
+    } finally {
+      committing.value = false
+    }
+  })()
 }
 
 const confirmBranch = () => {
@@ -301,94 +632,217 @@ const confirmBranch = () => {
     return
   }
 
-  const headCommit = commits.value.find((c) => c.hash === currentHead.value)
-  if (!headCommit) return
+  ;(async () => {
+    try {
+      // 사용자가 과거 커밋에서 "브랜치 생성"을 누른 시점의 기준 커밋을 고정합니다.
+      // (아래 자동 커밋이 currentHead를 최신으로 바꿔버리면 baseCommitId가 틀어질 수 있음)
+      const baseHash = currentHead.value
 
-  const newHash = genHash()
-  const maxCol = Math.max(...commits.value.map((c) => c.col))
-  const newCol = maxCol + 1
+      if (isDetached.value) {
+        const pendingCount = await getPendingMessageCount()
+        if (pendingCount > 0) {
+          toastNow('Branch', `미커밋 대화 ${pendingCount}건이 있어 자동 커밋 후 브랜치를 생성합니다.`, 2200)
+          const autoMessage = `AUTO_SAVE before branching from ${String(baseHash).slice(0, 8)}`
+          const baseSnap = snapshots[baseHash]
+          await createCommitOnServer(autoMessage, { silent: true })
+          // UI는 사용자가 보던 과거 커밋 기준으로 유지
+          if (baseSnap) {
+            messages.value = deepCopy(baseSnap)
+            currentHead.value = baseHash
+          }
+          toastNow('Branch', '미커밋 대화를 먼저 저장했습니다. 분기 생성을 계속합니다.', 1800)
+        }
+      }
 
-  commits.value.push({
-    hash: newHash,
-    parentId: currentHead.value,
-    branch: name,
-    msg: `Start ${name}`,
-    time: nowLabel(),
-    col: newCol,
-  })
+      const res = await BranchesService.create2(props.workspaceId, {
+        workspaceId: props.workspaceId,
+        name,
+        description: `Created from ${baseHash}`,
+        isDefault: false,
+        baseCommitId: isUuid(baseHash) ? baseHash : null,
+      })
 
-  messages.value.push({ type: 'commit', hash: newHash, text: `Created branch ${name}` })
-  snapshots[newHash] = deepCopy(messages.value)
+      const created = res.data
+      if (!created?.id) throw new Error('branch id missing')
 
-  activeBranch.value = name
-  currentHead.value = newHash
-  branchModal.open = false
-
-  toastNow('Branch created', `${name} at ${newHash}`)
-  scrollToBottom('chat-box')
-  scrollToCommitInSidebar(newHash)
+      branchModal.open = false
+      toastNow('Branch created', `${created.name} 브랜치로 이동합니다.`)
+      await router.push(`/w/${props.workspaceId}/b/${created.id}`)
+    } catch (e: any) {
+      toastNow('Branch', e?.message ?? '브랜치 생성 실패')
+    }
+  })()
 }
 
-const checkout = (commit: { hash: string; branch: string }) => {
-  currentHead.value = commit.hash
-  activeBranch.value = commit.branch
+const loadMessagesLatest = async (branchId: string = props.branchId) => {
+  const seq = ++timelineSeq
+  loadingTimeline.value = true
+  loadingCommitId.value = null
+  // "브랜치 화면"의 최신 대화는
+  // 1) 브랜치 HEAD 커밋까지의 공통 조상(분기 이전) 메시지 + 현재 브랜치의 커밋 메시지
+  // 2) 현재 브랜치의 미커밋(pending) 메시지
+  // 를 합쳐 보여야 합니다.
+  try {
+    const branchRes = await BranchesService.listByWorkspace(props.workspaceId)
+    if (seq !== timelineSeq) return
+    const currentBranch = (branchRes.data ?? []).find((b: any) => b.id === branchId)
+    const headCommitId = currentBranch?.headCommitId as string | undefined
+    if (branchId === props.branchId) {
+      serverHeadCommitId.value = headCommitId ?? null
+    }
+    const localHeadSnap = headCommitId ? (snapshots[headCommitId] as ChatMsg[] | undefined) : undefined
+    // ✅ 커밋+미커밋을 "한 번에" 렌더해서, 첫 클릭에 pending이 안 보였다가
+    // 두 번째 클릭에 보이는(혹은 잠깐 commit-only로 보이는) 현상을 없앱니다.
+    const [committedRes, pendingRes] = await Promise.all([
+      headCommitId ? MessagesService.timelineAtCommit(props.workspaceId, branchId, headCommitId, 1000) : Promise.resolve({ data: [] as any[] } as any),
+      MessagesService.timelineAfter(props.workspaceId, branchId, 0, 400),
+    ])
+    if (seq !== timelineSeq) return
 
-  const snap = snapshots[commit.hash]
-  if (snap) {
-    messages.value = deepCopy(snap)
-    toastNow('Checkout', `[${commit.hash}] restored snapshot`)
-  } else {
-    messages.value.push({ role: 'ai', text: `Checked out to [${commit.hash}] on ${commit.branch}` })
-    toastNow('Checkout', `[${commit.hash}] no snapshot yet`)
+    const committedList = (committedRes?.data ?? []) as any[]
+    const pendingList = (pendingRes?.data ?? []) as any[]
+    messages.value = buildTimelineRows(committedList, pendingList)
+    latestLoadedBranchId.value = branchId
+
+    // 서버에서 가져온 최신 대화가 로컬 스냅샷보다 짧으면(저장 실패/지연 가능),
+    // 사용자가 보던 "최근 대화"가 갑자기 사라지지 않도록 로컬 스냅샷을 유지합니다.
+    if (headCommitId && localHeadSnap && localHeadSnap.length > messages.value.length) {
+      messages.value = deepCopy(localHeadSnap) as ChatMsg[]
+      toastNow('Timeline', '서버에 아직 반영되지 않은 최근 대화가 있어 로컬 화면을 유지했어요.', 2200)
+    }
+    scrollToBottom('chat-box')
+  } finally {
+    if (seq === timelineSeq) {
+      loadingTimeline.value = false
+      loadingCommitId.value = null
+    }
+  }
+}
+
+const checkout = async (commit: { hash: string; branch: string; branchId?: string }) => {
+  if (streaming.value) return
+  forkMenuCommitId.value = null
+  // 커밋 이동 전에 현재 화면(미커밋 포함)을 스냅샷으로 보존
+  saveCurrentHeadSnapshot()
+  const currentBranchName = branchList.value.find((b) => b.id === props.branchId)?.name ?? activeBranch.value
+
+  // 다른 브랜치의 커밋을 눌렀더라도,
+  // 현재 브랜치 HEAD의 조상(공통 히스토리)이면 브랜치를 유지하고 포커스만 이동합니다.
+  // (예: B 브랜치에서 A2(분기점) 클릭 시 B 유지)
+  const isCrossBranchCommit = !!commit.branchId && commit.branchId !== props.branchId
+  const isAncestorOfCurrentBranchHead = currentBranchHeadLineageSet.value.has(commit.hash)
+
+  if (isCrossBranchCommit && !isAncestorOfCurrentBranchHead) {
+    pendingCheckoutCommitId.value = commit.hash
+    await router.push(`/w/${props.workspaceId}/b/${commit.branchId}`)
+    return
   }
 
+  currentHead.value = commit.hash
+  activeBranch.value = currentBranchName
+  // 현재 브랜치에서는 항상 전체 선형 히스토리(HEAD + 미커밋)를 유지하고
+  // 선택한 커밋 위치로만 포커스 이동합니다.
+  if (latestLoadedBranchId.value !== props.branchId) {
+    await loadMessagesLatest(props.branchId)
+  }
+  focusCommitInChat(commit.hash)
   scrollToCommitInSidebar(commit.hash)
-  scrollToBottom('chat-box')
 }
 
 const checkoutByHash = (hash: string) => {
   const c = commits.value.find((x) => x.hash === hash)
-  if (c) checkout(c)
+  if (c) void checkout(c as any)
 }
 
-const seedSnapshots = () => {
-  snapshots['h6i7j'] = deepCopy([{ role: 'ai', text: 'Ready to work on [main].', model: 'System' }])
-  snapshots['e4f5g'] = deepCopy([
-    { role: 'ai', text: 'Ready to work on [main].', model: 'System' },
-    { type: 'commit', hash: 'e4f5g', text: 'Init Project' },
-  ])
+let bootSeq = 0
+const bootstrapFromServer = async () => {
+  const seq = ++bootSeq
+  try {
+    const branchRes = await BranchesService.listByWorkspace(props.workspaceId)
+    const branches = (branchRes.data ?? []) as Array<any>
+    const currentBranch = branches.find((b: any) => b.id === props.branchId)
+    if (!currentBranch) return
+    if (seq !== bootSeq) return
+
+    branchList.value = branches.map((b: any) => ({
+      id: String(b.id ?? ''),
+      name: String(b.name ?? ''),
+      baseCommitId: b.baseCommitId ? String(b.baseCommitId) : null,
+      headCommitId: b.headCommitId ? String(b.headCommitId) : null,
+    }))
+
+    activeBranch.value = String(currentBranch.name ?? 'main')
+    serverHeadCommitId.value = (currentBranch.headCommitId as string | undefined) ?? null
+
+    const branchNameById: Record<string, string> = {}
+    branches.forEach((b: any) => {
+      if (b?.id && b?.name) branchNameById[String(b.id)] = String(b.name)
+    })
+
+    // 모든 브랜치의 커밋을 합쳐 DAG 그래프를 구성 (분기선 표시 목적)
+    const commitMap = new Map<string, any>()
+    for (const b of branches) {
+      if (!b?.id) continue
+      const listRes = await CommitsService.list4(props.workspaceId, String(b.id), 300)
+      const list = (listRes?.data ?? []) as Array<any>
+      for (const c of list) {
+        if (c?.id) commitMap.set(String(c.id), c)
+      }
+      if (seq !== bootSeq) return
+    }
+
+    const all = Array.from(commitMap.values())
+      .sort((a, b) => String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')))
+      .map((c) => {
+        const branchName = branchNameById[String(c.branchId)] ?? branchNameById[String(props.branchId)] ?? 'main'
+        const branchCol = Math.max(0, branches.findIndex((b: any) => String(b.name) === branchName))
+        return {
+          hash: String(c.id),
+          parentId: c.parentId ? String(c.parentId) : null,
+          branch: branchName,
+          branchId: String(c.branchId ?? ''),
+          msg: String(c.keyPoint ?? 'COMMIT'),
+          time: c.createdAt ? new Date(c.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
+          col: branchCol,
+        }
+      })
+
+    commits.value = all
+
+    const head = (currentBranch.headCommitId as string | undefined) ?? commits.value[commits.value.length - 1]?.hash
+    if (head) currentHead.value = head
+
+    // Load timeline (best-effort)
+    if (pendingCheckoutCommitId.value) {
+      const target = pendingCheckoutCommitId.value
+      pendingCheckoutCommitId.value = null
+      currentHead.value = target
+      await loadMessagesLatest(props.branchId)
+      focusCommitInChat(target)
+    } else {
+      await loadMessagesLatest(props.branchId)
+    }
+    saveCurrentHeadSnapshot()
+
+    scrollToBottom('graph-container')
+    scrollToBottom('chat-box')
+  } catch {
+    // ignore for MVP
+  }
 }
+
+watch(
+  () => [props.workspaceId, props.branchId],
+  () => {
+    void bootstrapFromServer()
+  },
+  { immediate: true },
+)
 
 onMounted(() => {
   const saved = localStorage.getItem('gitai_theme')
   isDark.value = saved ? saved === 'dark' : true
   applyTheme(isDark.value)
-
-  seedSnapshots()
-
-  scrollToBottom('graph-container')
-  scrollToBottom('chat-box')
-
-  // Load timeline (best-effort)
-  ;(async () => {
-    try {
-      const res = await MessagesService.timelineAfter(props.branchId, 0, 50)
-      const list = (res.data ?? []) as any[]
-      if (list.length > 0) {
-        // prepend history (very simple)
-        messages.value = [
-          ...list.map((m) => ({
-            role: m.role === 'USER' ? 'user' : 'ai',
-            text: m.content,
-          })),
-          ...messages.value,
-        ] as any
-        scrollToBottom('chat-box')
-      }
-    } catch {
-      // ignore for MVP
-    }
-  })()
 
   window.addEventListener('keydown', (e) => {
     if (!commitModal.open && !branchModal.open) return
@@ -397,6 +851,15 @@ onMounted(() => {
       branchModal.open = false
     }
   })
+})
+
+onBeforeUnmount(() => {
+  streamAbort?.abort()
+  streamAbort = null
+  if (highlightTimer) {
+    clearTimeout(highlightTimer)
+    highlightTimer = null
+  }
 })
 </script>
 
@@ -427,7 +890,8 @@ onMounted(() => {
               :d="path.d"
               fill="none"
               :stroke="path.color"
-              stroke-width="2"
+              :stroke-width="path.isActive ? 3.2 : 1.8"
+              :opacity="path.isActive ? 1 : 0.25"
               stroke-linecap="round"
               stroke-linejoin="round"
               class="graph-path"
@@ -451,12 +915,13 @@ onMounted(() => {
               :key="'n' + node.hash"
               :cx="node.x"
               :cy="node.y"
-              r="4.5"
-              class="node-pop cursor-pointer"
+              :r="currentHead === node.hash ? 5.8 : 4.5"
+              class="node-pop"
               :fill="currentHead === node.hash ? '#FFFFFF' : 'var(--sidebar)'"
               :stroke="node.color"
-              stroke-width="2.5"
-              @click="checkoutByHash(node.hash)"
+              :stroke-width="currentHead === node.hash ? 3.6 : 2.5"
+              :opacity="node.isActive || currentHead === node.hash ? 1 : 0.35"
+              pointer-events="none"
             />
           </svg>
         </div>
@@ -468,7 +933,10 @@ onMounted(() => {
             :key="commit.hash"
             :data-hash="commit.hash"
             class="h-[60px] flex flex-col justify-center px-3 cursor-pointer transition-colors group relative border-l-2"
-            :class="[currentHead === commit.hash ? 'bg-black/5 dark:bg-white/5 border-brand-primary' : 'border-transparent hover:bg-[var(--itemHover)]']"
+            :class="[
+              currentHead === commit.hash ? 'bg-black/5 dark:bg-white/5 border-brand-primary' : 'border-transparent hover:bg-[var(--itemHover)]',
+              selectedLineageSet.has(commit.hash) ? '' : 'opacity-50',
+            ]"
             @click="checkout(commit)"
           >
             <div class="flex items-center justify-between mb-0.5">
@@ -530,6 +998,13 @@ onMounted(() => {
           >
             DETACHED
           </span>
+
+          <span
+            v-if="loadingTimeline"
+            class="ml-2 text-[10px] font-mono px-2 py-0.5 rounded-full border border-sky-500/30 bg-sky-500/10 text-sky-600 dark:text-sky-300"
+          >
+            LOADING…
+          </span>
         </div>
 
         <div class="flex space-x-2">
@@ -552,7 +1027,15 @@ onMounted(() => {
       <div class="flex-1 overflow-y-auto p-6 space-y-6 scroll-smooth" id="chat-box">
         <template v-for="(msg, i) in messages" :key="i">
           <!-- Commit Log in Chat -->
-          <div v-if="(msg as any).type === 'commit'" class="relative py-4 group fade-in">
+          <div
+            v-if="msg.type === 'commit'"
+            :data-commit-divider="msg.hash"
+            class="relative py-4 group fade-in transition-all duration-300"
+            :class="[
+              isFutureMessage(msg) ? 'opacity-45' : 'opacity-100',
+              highlightedCommitId === msg.hash ? 'ring-2 ring-amber-300/70 rounded-xl' : '',
+            ]"
+          >
             <div class="absolute inset-0 flex items-center">
               <div
                 class="w-full border-t border-dashed"
@@ -561,38 +1044,71 @@ onMounted(() => {
             </div>
             <div class="relative flex justify-center">
               <div
-                class="px-4 py-1.5 rounded-full text-[11px] font-mono border bg-[var(--sidebar)] flex items-center shadow-lg"
+                class="px-4 py-1.5 rounded-full text-[11px] font-mono border bg-[var(--sidebar)] flex items-center shadow-lg gap-2"
                 :style="{
                   borderColor: 'var(--chipBorder)',
                   color: 'var(--muted)',
                   boxShadow: '0 10px 25px ' + (isDark ? 'rgba(0,0,0,0.25)' : 'rgba(0,0,0,0.08)'),
                 }"
               >
-                <i class="fa-solid fa-circle-dot mr-2 text-brand-primary"></i>
-                <span class="opacity-70 mr-2">[{{ (msg as any).hash }}]</span>
-                <span class="font-sans font-medium" :style="{ color: 'var(--text)' }">{{ (msg as any).text }}</span>
+                <i class="fa-solid fa-circle-dot text-brand-primary"></i>
+                <span v-if="!msg.isWorkingTree" class="opacity-70">[{{ shortHash(msg.hash) }}]</span>
+                <span class="font-sans font-medium" :style="{ color: 'var(--text)' }">{{ msg.text }}</span>
+
+                <button
+                  v-if="!msg.isWorkingTree && hasFork(msg.hash)"
+                  class="ml-1 px-2 py-0.5 rounded-full text-[10px] border border-cyan-500/40 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20"
+                  :title="forkTooltip(msg.hash)"
+                  @click.stop="toggleForkMenu(msg.hash)"
+                >
+                  🔀 {{ forkLabel(msg.hash) }}
+                </button>
+              </div>
+
+              <div
+                v-if="!msg.isWorkingTree && forkMenuCommitId === msg.hash"
+                class="absolute top-8 z-20 min-w-[200px] rounded-lg border bg-[var(--sidebar)] p-2 shadow-xl"
+                :style="{ borderColor: 'var(--chipBorder)' }"
+              >
+                <div class="px-2 pb-1 text-[10px] font-mono opacity-70">Checkout branch</div>
+                <button
+                  v-for="b in getForkBranches(msg.hash)"
+                  :key="b.id"
+                  class="w-full text-left px-2 py-1.5 rounded text-xs hover:bg-[var(--itemHover)]"
+                  @click.stop="checkoutBranchById(b.id)"
+                >
+                  <i class="fa-solid fa-code-branch mr-1.5"></i>{{ b.name }}
+                </button>
               </div>
             </div>
           </div>
 
           <!-- Normal message -->
-          <div v-else class="flex w-full fade-in" :class="(msg as any).role === 'user' ? 'justify-end' : 'justify-start'">
+          <div
+            v-else
+            class="flex w-full fade-in transition-opacity duration-300"
+            :data-msg-commit="msg.commitId || undefined"
+            :class="[msg.role === 'user' ? 'justify-end' : 'justify-start', isFutureMessage(msg) ? 'opacity-45' : 'opacity-100']"
+          >
             <div
-              v-if="(msg as any).role === 'ai'"
+              v-if="msg.role === 'ai'"
               class="w-8 h-8 rounded-lg bg-brand-primary flex items-center justify-center mr-3 mt-1 shadow-md text-white shrink-0"
             >
               <i class="fa-solid fa-robot text-xs"></i>
             </div>
             <div
               class="max-w-[80%] p-4 rounded-2xl text-sm leading-relaxed shadow-sm relative"
-              :class="(msg as any).role === 'user' ? 'bg-brand-primary text-white rounded-tr-none' : 'bg-[var(--sidebar)] border border-[var(--border)] rounded-tl-none'"
+              :class="[
+                msg.role === 'user' ? 'bg-brand-primary text-white rounded-tr-none' : 'bg-[var(--sidebar)] border border-[var(--border)] rounded-tl-none',
+                highlightedCommitId && msg.commitId === highlightedCommitId ? 'ring-2 ring-amber-300/70' : '',
+              ]"
               :style="
-                (msg as any).role === 'ai'
+                msg.role === 'ai'
                   ? { color: 'var(--text)', boxShadow: '0 10px 24px ' + (isDark ? 'rgba(0,0,0,0.30)' : 'rgba(0,0,0,0.08)') }
                   : {}
               "
             >
-              <div class="whitespace-pre-wrap">{{ (msg as any).text }}</div>
+              <div class="whitespace-pre-wrap">{{ msg.text }}</div>
             </div>
           </div>
         </template>
@@ -617,8 +1133,12 @@ onMounted(() => {
                   {{ isDetached ? 'Checkout 상태에서는 커밋이 가능하지만, 별도 브랜치로 저장하는 걸 추천해요.' : 'Ready' }}
                 </span>
               </div>
-              <button @click="send" class="text-brand-primary hover:opacity-90 text-xs font-bold px-3 py-1 transition-colors">
-                SEND <i class="fa-solid fa-paper-plane ml-1"></i>
+              <button
+                @click="send"
+                :disabled="streaming"
+                class="text-brand-primary hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed text-xs font-bold px-3 py-1 transition-colors"
+              >
+                {{ streaming ? 'STREAMING…' : 'SEND' }} <i class="fa-solid fa-paper-plane ml-1"></i>
               </button>
             </div>
           </div>
@@ -656,8 +1176,12 @@ onMounted(() => {
             <button class="px-3 py-2 text-xs rounded-lg border hover:bg-[var(--itemHover)]" :style="{ borderColor: 'var(--border)' }" @click="closeCommitModal">
               Cancel
             </button>
-            <button class="px-3 py-2 text-xs rounded-lg bg-brand-primary text-white hover:bg-purple-600" @click="confirmCommit">
-              <i class="fa-solid fa-floppy-disk mr-1.5"></i> Commit
+            <button
+              class="px-3 py-2 text-xs rounded-lg bg-brand-primary text-white hover:bg-purple-600 disabled:opacity-60 disabled:cursor-not-allowed"
+              :disabled="committing"
+              @click="confirmCommit"
+            >
+              <i class="fa-solid fa-floppy-disk mr-1.5"></i> {{ committing ? 'Committing…' : 'Commit' }}
             </button>
           </div>
 

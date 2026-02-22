@@ -37,6 +37,7 @@ export class MessagesService {
     /**
      * 브랜치 타임라인 조회(after)
      * branchId 기준 sequence 오름차순. after(배타), limit 기본 50
+     * @param workspaceId
      * @param branchId
      * @param after
      * @param limit
@@ -44,6 +45,7 @@ export class MessagesService {
      * @throws ApiError
      */
     public static timelineAfter(
+        workspaceId: string,
         branchId: string,
         after?: number,
         limit: number = 50,
@@ -52,10 +54,41 @@ export class MessagesService {
             method: 'GET',
             url: '/api/workspaces/{workspaceId}/branches/{branchId}/messages/timeline',
             path: {
+                'workspaceId': workspaceId,
                 'branchId': branchId,
             },
             query: {
                 'after': after,
+                'limit': limit,
+            },
+        });
+    }
+
+    /**
+     * 커밋 시점까지 타임라인 조회
+     * commitId(포함)까지의 메시지를 조회합니다.
+     * @param workspaceId
+     * @param branchId
+     * @param commitId
+     * @param limit
+     * @returns ApiResponseListMessageResponse OK
+     * @throws ApiError
+     */
+    public static timelineAtCommit(
+        workspaceId: string,
+        branchId: string,
+        commitId: string,
+        limit: number = 500,
+    ): CancelablePromise<ApiResponseListMessageResponse> {
+        return __request(OpenAPI, {
+            method: 'GET',
+            url: '/api/workspaces/{workspaceId}/branches/{branchId}/messages/timeline/at-commit',
+            path: {
+                'workspaceId': workspaceId,
+                'branchId': branchId,
+            },
+            query: {
+                'commitId': commitId,
                 'limit': limit,
             },
         });
