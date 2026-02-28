@@ -11,8 +11,18 @@ const router = useRouter()
 
 // Layout constants (same as design)
 const ROW_HEIGHT = 60
-const COL_WIDTH = 20
+const TRACK_GAP = 22
 const START_X = 20
+const SIDEBAR_MIN_WIDTH = 280
+const SIDEBAR_MAX_WIDTH = 560
+const SIDEBAR_DEFAULT_WIDTH = 340
+const GRAPH_PANE_MIN_WIDTH = 80
+const GRAPH_PANE_MAX_WIDTH = 320
+const GRAPH_PANE_DEFAULT_WIDTH = 110
+const COMMIT_LIST_MIN_WIDTH = 160
+const SIDEBAR_WIDTH_KEY = 'gitai_sidebar_width'
+const SIDEBAR_COLLAPSED_KEY = 'gitai_sidebar_collapsed'
+const GRAPH_PANE_WIDTH_KEY = 'gitai_graph_pane_width'
 
 // Theme
 const isDark = ref(true)
@@ -26,6 +36,93 @@ const toggleTheme = () => {
   isDark.value = !isDark.value
   applyTheme(isDark.value)
   toastNow('Theme', isDark.value ? 'Dark mode' : 'Light mode')
+}
+
+const sidebarWidth = ref(SIDEBAR_DEFAULT_WIDTH)
+const sidebarCollapsed = ref(false)
+const sidebarResizing = ref(false)
+let sidebarResizeStartX = 0
+let sidebarResizeStartWidth = SIDEBAR_DEFAULT_WIDTH
+const graphPaneWidth = ref(GRAPH_PANE_DEFAULT_WIDTH)
+const graphPaneResizing = ref(false)
+let graphPaneResizeStartX = 0
+let graphPaneResizeStartWidth = GRAPH_PANE_DEFAULT_WIDTH
+
+const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v))
+
+const persistSidebarState = () => {
+  localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth.value))
+  localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed.value ? '1' : '0')
+  localStorage.setItem(GRAPH_PANE_WIDTH_KEY, String(graphPaneWidth.value))
+}
+
+const loadSidebarState = () => {
+  const savedWidth = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY))
+  if (!Number.isNaN(savedWidth) && savedWidth > 0) {
+    sidebarWidth.value = clamp(savedWidth, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH)
+  }
+  const savedGraphPaneWidth = Number(localStorage.getItem(GRAPH_PANE_WIDTH_KEY))
+  if (!Number.isNaN(savedGraphPaneWidth) && savedGraphPaneWidth > 0) {
+    graphPaneWidth.value = clamp(savedGraphPaneWidth, GRAPH_PANE_MIN_WIDTH, GRAPH_PANE_MAX_WIDTH)
+  }
+  const maxGraph = Math.max(GRAPH_PANE_MIN_WIDTH, Math.min(GRAPH_PANE_MAX_WIDTH, sidebarWidth.value - COMMIT_LIST_MIN_WIDTH))
+  if (graphPaneWidth.value > maxGraph) graphPaneWidth.value = maxGraph
+  sidebarCollapsed.value = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1'
+}
+
+const stopSidebarResize = () => {
+  if (!sidebarResizing.value) return
+  sidebarResizing.value = false
+  window.removeEventListener('mousemove', onSidebarResizeMove)
+  window.removeEventListener('mouseup', stopSidebarResize)
+  persistSidebarState()
+}
+
+const onSidebarResizeMove = (e: MouseEvent) => {
+  if (!sidebarResizing.value) return
+  const delta = e.clientX - sidebarResizeStartX
+  sidebarWidth.value = clamp(sidebarResizeStartWidth + delta, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH)
+  // 사이드바가 줄어들 때 그래프 패널이 리스트를 밀어내지 않도록 보정
+  const maxGraph = Math.max(GRAPH_PANE_MIN_WIDTH, Math.min(GRAPH_PANE_MAX_WIDTH, sidebarWidth.value - COMMIT_LIST_MIN_WIDTH))
+  if (graphPaneWidth.value > maxGraph) graphPaneWidth.value = maxGraph
+}
+
+const startSidebarResize = (e: MouseEvent) => {
+  if (sidebarCollapsed.value) return
+  sidebarResizing.value = true
+  sidebarResizeStartX = e.clientX
+  sidebarResizeStartWidth = sidebarWidth.value
+  window.addEventListener('mousemove', onSidebarResizeMove)
+  window.addEventListener('mouseup', stopSidebarResize)
+}
+
+const stopGraphPaneResize = () => {
+  if (!graphPaneResizing.value) return
+  graphPaneResizing.value = false
+  window.removeEventListener('mousemove', onGraphPaneResizeMove)
+  window.removeEventListener('mouseup', stopGraphPaneResize)
+  persistSidebarState()
+}
+
+const onGraphPaneResizeMove = (e: MouseEvent) => {
+  if (!graphPaneResizing.value) return
+  const delta = e.clientX - graphPaneResizeStartX
+  const maxGraph = Math.max(GRAPH_PANE_MIN_WIDTH, Math.min(GRAPH_PANE_MAX_WIDTH, sidebarWidth.value - COMMIT_LIST_MIN_WIDTH))
+  graphPaneWidth.value = clamp(graphPaneResizeStartWidth + delta, GRAPH_PANE_MIN_WIDTH, maxGraph)
+}
+
+const startGraphPaneResize = (e: MouseEvent) => {
+  if (sidebarCollapsed.value) return
+  graphPaneResizing.value = true
+  graphPaneResizeStartX = e.clientX
+  graphPaneResizeStartWidth = graphPaneWidth.value
+  window.addEventListener('mousemove', onGraphPaneResizeMove)
+  window.addEventListener('mouseup', stopGraphPaneResize)
+}
+
+const toggleSidebar = () => {
+  sidebarCollapsed.value = !sidebarCollapsed.value
+  persistSidebarState()
 }
 
 // State
@@ -152,22 +249,95 @@ const getBranchColor = (branch: string) => {
 }
 
 // --- Computed: Graph nodes/paths ---
+const branchTrackMap = computed(() => {
+  const byId: Record<string, number> = {}
+  let next = 0
+
+  const allBranches = [...branchList.value]
+  allBranches.sort((a, b) => {
+    if (a.name === 'main') return -1
+    if (b.name === 'main') return 1
+    return a.name.localeCompare(b.name)
+  })
+
+  for (const b of allBranches) {
+    if (!b.id) continue
+    if (typeof byId[b.id] !== 'undefined') continue
+    byId[b.id] = next++
+  }
+
+  // API에서 브랜치 목록이 늦게 오거나 누락되더라도, 커밋 데이터 기준으로 트랙을 보강합니다.
+  for (const c of commits.value) {
+    const id = c.branchId ? String(c.branchId) : `name:${c.branch}`
+    if (typeof byId[id] === 'undefined') byId[id] = next++
+  }
+  return byId
+})
+
+const commitTrackMap = computed(() => {
+  const map: Record<string, number> = {}
+  commits.value.forEach((c) => {
+    const id = c.branchId ? String(c.branchId) : `name:${c.branch}`
+    map[c.hash] = branchTrackMap.value[id] ?? 0
+  })
+  return map
+})
+
 const graphNodes = computed(() =>
-  commits.value.map((c, idx) => ({
-    hash: c.hash,
-    x: START_X + c.col * COL_WIDTH,
-    y: idx * ROW_HEIGHT + ROW_HEIGHT / 2,
-    color: getBranchColor(c.branch),
-    isActive: selectedLineageSet.value.has(c.hash),
-  })),
+  commits.value.map((c, idx) => {
+    const track = commitTrackMap.value[c.hash] ?? 0
+    return {
+      hash: c.hash,
+      x: START_X + track * TRACK_GAP,
+      y: idx * ROW_HEIGHT + ROW_HEIGHT / 2,
+      color: getBranchColor(c.branch),
+      isActive: selectedLineageSet.value.has(c.hash),
+      track,
+      row: idx,
+    }
+  }),
 )
 
 const containerHeight = computed(() => commits.value.length * ROW_HEIGHT)
+const maxTrackInGraph = computed(() => graphNodes.value.reduce((m, n) => Math.max(m, n.track), 0))
+const requiredGraphPaneWidth = computed(() => START_X + (maxTrackInGraph.value + 1) * TRACK_GAP + 26)
+const graphPaneRenderWidth = computed(() => {
+  const maxGraph = Math.max(GRAPH_PANE_MIN_WIDTH, Math.min(GRAPH_PANE_MAX_WIDTH, sidebarWidth.value - COMMIT_LIST_MIN_WIDTH))
+  const minGraph = Math.max(GRAPH_PANE_MIN_WIDTH, requiredGraphPaneWidth.value)
+  return clamp(graphPaneWidth.value, minGraph, Math.max(minGraph, maxGraph))
+})
 
 const graphPaths = computed(() => {
   const paths: Array<{ d: string; color: string; isActive: boolean }> = []
-  const nodesMap: Record<string, { x: number; y: number; color: string }> = {}
+  const nodesMap: Record<string, { x: number; y: number; color: string; track: number; row: number }> = {}
   graphNodes.value.forEach((n) => (nodesMap[n.hash] = n))
+
+  const maxTrack = graphNodes.value.reduce((m, n) => Math.max(m, n.track), 0)
+  const rowTrack: number[] = graphNodes.value.map((n) => n.track)
+
+  const pickViaTrack = (fromTrack: number, toTrack: number, fromRow: number, toRow: number) => {
+    if (Math.abs(fromTrack - toTrack) <= 1) return toTrack
+    const minT = Math.min(fromTrack, toTrack)
+    const maxT = Math.max(fromTrack, toTrack)
+    const usedMid = new Set<number>()
+    for (let r = fromRow + 1; r < toRow; r++) {
+      const tr = rowTrack[r]
+      if (typeof tr === 'number') usedMid.add(tr)
+    }
+
+    // 1) 우선 두 트랙 사이의 빈 트랙을 사용
+    for (let t = minT + 1; t < maxT; t++) {
+      if (!usedMid.has(t)) return t
+    }
+    // 2) 없으면 바깥쪽으로 우회
+    for (let d = 1; d <= 4; d++) {
+      const right = maxT + d
+      if (right <= maxTrack + 4 && !usedMid.has(right)) return right
+      const left = minT - d
+      if (left >= 0 && !usedMid.has(left)) return left
+    }
+    return toTrack
+  }
 
   commits.value.forEach((commit) => {
     if (!commit.parentId) return
@@ -180,12 +350,22 @@ const graphPaths = computed(() => {
     const endX = currNode.x
     const endY = currNode.y
 
-    const cp1y = startY + ROW_HEIGHT / 2
-    const cp2y = endY - ROW_HEIGHT / 2
+    const viaTrack = pickViaTrack(parentNode.track, currNode.track, parentNode.row, currNode.row)
+    const viaX = START_X + viaTrack * TRACK_GAP
+    const cp1y = startY + ROW_HEIGHT * 0.55
+    const cp2y = endY - ROW_HEIGHT * 0.45
 
     let d = `M ${startX} ${startY} `
-    if (startX === endX) d += `L ${endX} ${endY}`
-    else d += `C ${startX} ${cp1y}, ${endX} ${cp2y}, ${endX} ${endY}`
+    if (startX === endX) {
+      d += `L ${endX} ${endY}`
+    } else if (viaTrack === currNode.track) {
+      d += `C ${startX} ${cp1y}, ${endX} ${cp2y}, ${endX} ${endY}`
+    } else {
+      const midY = (cp1y + cp2y) / 2
+      d += `C ${startX} ${cp1y}, ${viaX} ${cp1y}, ${viaX} ${midY} `
+      d += `L ${viaX} ${cp2y} `
+      d += `C ${viaX} ${cp2y}, ${endX} ${cp2y}, ${endX} ${endY}`
+    }
 
     const isActive = !!commit.parentId && selectedLineageSet.value.has(commit.hash) && selectedLineageSet.value.has(commit.parentId)
     paths.push({ d, color: getBranchColor(commit.branch), isActive })
@@ -373,8 +553,6 @@ const appendCommitToGraph = (newHash: string, parentHash: string | null, message
     col: headCommit?.col ?? 0,
   })
 
-  messages.value.push({ type: 'commit', hash: newHash, text: message })
-  snapshots[newHash] = deepCopy(messages.value) as ChatMsg[]
   currentHead.value = newHash
 }
 
@@ -407,6 +585,10 @@ const createCommitOnServer = async (
 
   if (options.closeModal) commitModal.open = false
   if (!options.silent) {
+    // 커밋 구분선 위치를 항상 서버 기준(해당 커밋의 시작 지점)으로 일치시킵니다.
+    await loadMessagesLatest(props.branchId)
+    focusCommitInChat(newHash)
+    saveCurrentHeadSnapshot()
     toastNow('Committed', `[${newHash.slice(0, 8)}] ${finalMsg}`)
   }
   scrollToBottom('chat-box')
@@ -843,6 +1025,7 @@ onMounted(() => {
   const saved = localStorage.getItem('gitai_theme')
   isDark.value = saved ? saved === 'dark' : true
   applyTheme(isDark.value)
+  loadSidebarState()
 
   window.addEventListener('keydown', (e) => {
     if (!commitModal.open && !branchModal.open) return
@@ -856,6 +1039,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   streamAbort?.abort()
   streamAbort = null
+  stopSidebarResize()
+  stopGraphPaneResize()
   if (highlightTimer) {
     clearTimeout(highlightTimer)
     highlightTimer = null
@@ -866,22 +1051,32 @@ onBeforeUnmount(() => {
 <template>
   <div class="flex h-full w-full">
     <!-- [LEFT] SIDEBAR -->
-    <aside class="w-[340px] flex flex-col border-r border-[var(--border)] bg-[var(--sidebar)] flex-shrink-0 z-20">
+    <div v-if="!sidebarCollapsed" class="flex h-full flex-shrink-0" :style="{ width: `${sidebarWidth}px` }">
+      <aside class="h-full w-full flex flex-col border-r border-[var(--border)] bg-[var(--sidebar)] z-20">
       <!-- 1. Repo Header -->
       <div class="h-14 border-b border-[var(--border)] flex items-center px-4 justify-between flex-shrink-0">
         <div class="flex items-center min-w-0 font-semibold">
           <i class="fa-solid fa-code-branch text-brand-primary mr-2"></i>
           <span class="truncate">gait-project</span>
         </div>
-        <div class="text-[10px] bg-brand-primary/15 text-brand-secondary px-2 py-0.5 rounded font-mono">
-          {{ commits.length }} Commits
+        <div class="flex items-center gap-2">
+          <div class="text-[10px] bg-brand-primary/15 text-brand-secondary px-2 py-0.5 rounded font-mono">
+            {{ commits.length }} Commits
+          </div>
+          <button
+            class="w-6 h-6 rounded border border-[var(--chipBorder)] text-[11px] hover:bg-[var(--itemHover)]"
+            title="사이드바 닫기"
+            @click="toggleSidebar"
+          >
+            <i class="fa-solid fa-angle-left"></i>
+          </button>
         </div>
       </div>
 
       <!-- 2. Git Graph -->
       <div class="flex-1 overflow-y-auto overflow-x-hidden relative flex" id="graph-container">
         <!-- SVG Layer (Lines + Nodes) -->
-        <div class="w-[80px] flex-shrink-0 relative h-full border-r border-[var(--border)]/40">
+        <div class="flex-shrink-0 relative h-full border-r border-[var(--border)]/40" :style="{ width: `${graphPaneRenderWidth}px` }">
           <svg class="absolute top-0 left-0 w-full" :style="{ height: Math.max(containerHeight, 600) + 'px' }">
             <!-- Paths -->
             <path
@@ -925,9 +1120,13 @@ onBeforeUnmount(() => {
             />
           </svg>
         </div>
+        <div
+          class="w-1 h-full flex-shrink-0 cursor-col-resize bg-transparent hover:bg-brand-primary/20 active:bg-brand-primary/30 transition-colors"
+          @mousedown.prevent="startGraphPaneResize"
+        ></div>
 
         <!-- List Layer -->
-        <div class="flex-1 pt-4 pb-10">
+        <div class="flex-1 min-w-[160px] pt-4 pb-10">
           <div
             v-for="commit in commits"
             :key="commit.hash"
@@ -977,10 +1176,22 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
-    </aside>
+      </aside>
+      <div
+        class="w-1 h-full cursor-col-resize bg-transparent hover:bg-brand-primary/20 active:bg-brand-primary/30 transition-colors"
+        @mousedown.prevent="startSidebarResize"
+      ></div>
+    </div>
 
     <!-- [RIGHT] CHAT AREA -->
     <main class="flex-1 flex flex-col min-w-0 bg-[var(--bg)] relative">
+      <button
+        v-if="sidebarCollapsed"
+        class="absolute left-2 top-2 z-30 px-2.5 py-1.5 rounded-md text-xs border border-[var(--chipBorder)] bg-[var(--sidebar)] hover:bg-[var(--itemHover)]"
+        @click="toggleSidebar"
+      >
+        <i class="fa-solid fa-code-branch mr-1.5"></i> Graph
+      </button>
       <!-- Nav / HUD -->
       <div class="h-14 border-b border-[var(--border)] flex items-center justify-between px-6 flex-shrink-0 bg-[var(--bg)] z-10">
         <div class="flex items-center space-x-3 min-w-0">
