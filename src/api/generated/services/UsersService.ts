@@ -14,7 +14,7 @@ export class UsersService {
      * @returns ApiResponseListWorkspaceResponse OK
      * @throws ApiError
      */
-    public static list(
+    public static list1(
         userId: string,
     ): CancelablePromise<ApiResponseListWorkspaceResponse> {
         return __request(OpenAPI, {

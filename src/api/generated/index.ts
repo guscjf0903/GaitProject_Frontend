@@ -11,6 +11,7 @@ export type { ApiResponse } from './models/ApiResponse';
 export type { ApiResponseBranchResponse } from './models/ApiResponseBranchResponse';
 export type { ApiResponseCommitCreateResultResponse } from './models/ApiResponseCommitCreateResultResponse';
 export type { ApiResponseListBranchResponse } from './models/ApiResponseListBranchResponse';
+export type { ApiResponseListCommitResponse } from './models/ApiResponseListCommitResponse';
 export type { ApiResponseListMessageResponse } from './models/ApiResponseListMessageResponse';
 export type { ApiResponseListWorkspaceResponse } from './models/ApiResponseListWorkspaceResponse';
 export type { ApiResponseMergeResponse } from './models/ApiResponseMergeResponse';

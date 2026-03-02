@@ -612,7 +612,7 @@ const refreshCurrentBranchCommits = async (branchId: string = props.branchId) =>
       serverHeadCommitId.value = (currentBranch.headCommitId as string | undefined) ?? null
     }
 
-    const listRes = await CommitsService.list4(props.workspaceId, branchId, 300)
+    const listRes = await CommitsService.list(props.workspaceId, branchId, 300)
     const serverCommits = ((listRes?.data ?? []) as Array<any>).slice().reverse()
     if (serverCommits.length === 0) return
 
@@ -651,24 +651,7 @@ const send = async () => {
   input.value = ''
   scrollToBottom('chat-box')
 
-  // Persist user message (best-effort)
-  try {
-    await MessagesService.send(workspaceId, branchId, {
-      // backend DTO validates these as not-null (even though it's also in path)
-      workspaceId,
-      branchId,
-      userId: auth.userId ?? null,
-      role: 'USER',
-      content,
-      metadata: null,
-    })
-  } catch (e: any) {
-    // 서버 저장 실패하면, 나중에 커밋 이동/새로고침 시 사라질 수 있으니 즉시 알려줍니다.
-    toastNow('Message', e?.message ?? '메시지 저장 실패(서버). 새로고침/이동 시 사라질 수 있어요.', 2200)
-  } finally {
-    // auto-commit은 user message 저장 시점에 발생할 수 있으므로, 커밋 목록을 즉시 동기화
-    await refreshCurrentBranchCommits(branchId)
-  }
+  // 백엔드가 스트리밍 요청을 받으면 유저 메시지도 알아서 저장하므로, 여기서 별도로 MessagesService.send 하지 않습니다.
 
   // Start streaming AI answer (POST + event-stream)
   let aiIndex = messages.value.length
@@ -703,32 +686,20 @@ const send = async () => {
             scrollToBottom('chat-box')
           }
         },
-        onDone: () => {
+        onDone: (raw) => {
           streaming.value = false
           streamAbort = null
           saveCurrentHeadSnapshot()
           scrollToBottom('chat-box')
 
-          // Persist assistant message (best-effort)
-          ;(async () => {
-            try {
-              const msg = messages.value[aiIndex] as any
-              const text = msg?.role === 'ai' ? String(msg.text ?? '') : ''
-              if (!text) return
-              await MessagesService.send(workspaceId, branchId, {
-                workspaceId,
-                branchId,
-                role: 'ASSISTANT',
-                content: text,
-                metadata: null,
-              })
-            } catch (e: any) {
-              toastNow('Message', e?.message ?? 'AI 메시지 저장 실패(서버). 새로고침/이동 시 사라질 수 있어요.', 2200)
-            } finally {
-              // assistant 저장 이후에도 auto-commit/commit 반영이 늦게 들어올 수 있어 한번 더 동기화
-              await refreshCurrentBranchCommits(branchId)
-            }
-          })()
+          const doneData = raw?.data?.data || {}
+          const totalTokens = doneData.totalTokens
+          if (typeof totalTokens === 'number') {
+            toastNow('Token Usage', `이번 대화: ${totalTokens} tokens 사용`)
+          }
+
+          // 백엔드가 AI 메시지를 스스로 저장했으므로 프론트는 렌더링만 마무리하고 목록을 갱신합니다.
+          refreshCurrentBranchCommits(branchId)
         },
       },
     })
@@ -965,7 +936,7 @@ const bootstrapFromServer = async () => {
     const commitMap = new Map<string, any>()
     for (const b of branches) {
       if (!b?.id) continue
-      const listRes = await CommitsService.list4(props.workspaceId, String(b.id), 300)
+      const listRes = await CommitsService.list(props.workspaceId, String(b.id), 300)
       const list = (listRes?.data ?? []) as Array<any>
       for (const c of list) {
         if (c?.id) commitMap.set(String(c.id), c)

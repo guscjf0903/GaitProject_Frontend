@@ -20,7 +20,7 @@ export type BranchCreateRequest = {
      */
     isDefault: boolean;
     /**
-     * 브랜치 시작 기준 커밋 ID(선택)
+     * 브랜치 시작 기준 커밋 ID(선택). 지정하면 해당 커밋을 base/head로 설정
      */
     baseCommitId?: string | null;
 };

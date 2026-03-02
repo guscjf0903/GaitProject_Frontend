@@ -27,5 +27,11 @@ export type MessageSendRequest = {
      * 메타데이터(JSON 문자열 등)
      */
     metadata?: string | null;
+    rawPrompt?: string;
+    rawResponse?: string;
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+    modelName?: string;
 };
 

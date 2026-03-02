@@ -7,7 +7,7 @@ export type SseFrame = {
 export type SseHandlers = {
   onEvent?: (frame: SseFrame) => void
   onChunk?: (payload: any) => void
-  onDone?: () => void
+  onDone?: (payload?: any) => void
 }
 
 /**
@@ -61,7 +61,11 @@ export async function streamChatSse(options: {
       }
     }
     if (ev === 'ANSWER_DONE') {
-      options.handlers?.onDone?.()
+      try {
+        options.handlers?.onDone?.(JSON.parse(frame.data))
+      } catch {
+        options.handlers?.onDone?.()
+      }
     }
   }
 

@@ -12,6 +12,10 @@ export type ChatStreamRequest = {
      */
     branchId: string;
     /**
+     * 컨텍스트 기준 커밋 ID(체크아웃/타임트래블 시점). null이면 브랜치 HEAD 기준
+     */
+    contextCommitId?: string | null;
+    /**
      * 사용자 질문/메시지 내용
      */
     content: string;

@@ -12,6 +12,12 @@ export type MessageResponse = {
     content: string;
     metadata?: string;
     sequence: number;
+    rawPrompt?: string;
+    rawResponse?: string;
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+    modelName?: string;
     createdAt?: string;
     updatedAt?: string;
     deletedAt?: string;

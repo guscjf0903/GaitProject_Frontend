@@ -63,10 +63,9 @@ export class MessagesService {
             },
         });
     }
-
     /**
      * 커밋 시점까지 타임라인 조회
-     * commitId(포함)까지의 메시지를 조회합니다.
+     * commitId(포함)까지의 메시지를 조회합니다. 다른 브랜치/미래 커밋 메시지는 포함되지 않습니다.
      * @param workspaceId
      * @param branchId
      * @param commitId

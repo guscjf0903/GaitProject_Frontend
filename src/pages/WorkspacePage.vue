@@ -24,7 +24,7 @@ async function loadWorkspaces() {
   loading.value = true
   error.value = null
   try {
-    const res = await UsersService.list(auth.userId as string)
+    const res = await UsersService.list1(auth.userId as string)
     workspaces.value = (res.data ?? []).map((w: any) => ({ id: w.id, name: w.name }))
   } catch (e: any) {
     error.value = e?.message ?? '워크스페이스 조회 실패'
