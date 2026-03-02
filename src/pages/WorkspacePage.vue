@@ -96,6 +96,11 @@ async function goChat(branchId: string) {
   await router.push(`/w/${selectedWorkspaceId.value}/b/${branchId}`)
 }
 
+async function logout() {
+  auth.clear()
+  await router.push('/login')
+}
+
 onMounted(() => {
   void loadWorkspaces()
 })
@@ -105,7 +110,15 @@ onMounted(() => {
   <div class="h-full w-full flex items-center justify-center p-6">
     <div class="w-[520px] max-w-[92vw] rounded-2xl border bg-[var(--sidebar)] shadow-2xl p-5"
          :style="{ borderColor: 'var(--border)' }">
-      <div class="font-semibold mb-1">Workspace</div>
+      <div class="flex items-center justify-between mb-1">
+        <div class="font-semibold">Workspace</div>
+        <button
+          @click="logout"
+          class="px-2 py-1 text-xs rounded border border-red-500/30 text-red-500 hover:bg-red-500/10 transition"
+        >
+          Logout
+        </button>
+      </div>
       <div class="text-xs mb-3" :style="{ color: 'var(--muted)' }">userId: {{ auth.userId ?? 'not logged in' }}</div>
 
       <div class="flex gap-2">

@@ -984,6 +984,15 @@ const bootstrapFromServer = async () => {
   }
 }
 
+const goWorkspaces = async () => {
+  await router.push('/')
+}
+
+const logout = async () => {
+  auth.clear()
+  await router.push('/login')
+}
+
 watch(
   () => [props.workspaceId, props.branchId],
   () => {
@@ -1140,8 +1149,16 @@ onBeforeUnmount(() => {
             <div class="text-[10px]" :style="{ color: 'var(--muted)' }">1.2M Tokens left</div>
           </div>
           <button
+            @click="logout"
+            title="로그아웃"
+            class="ml-1 px-2.5 py-1.5 rounded-md text-xs border border-[var(--chipBorder)] text-red-500 hover:bg-red-500/10 transition"
+          >
+            <i class="fa-solid fa-arrow-right-from-bracket"></i>
+          </button>
+          <button
             @click="toggleTheme"
-            class="ml-2 px-2.5 py-1.5 rounded-md text-xs border border-[var(--chipBorder)] hover:bg-[var(--itemHover)] transition"
+            title="테마 변경"
+            class="ml-1 px-2.5 py-1.5 rounded-md text-xs border border-[var(--chipBorder)] hover:bg-[var(--itemHover)] transition"
           >
             <i class="fa-solid" :class="isDark ? 'fa-sun' : 'fa-moon'"></i>
           </button>
@@ -1166,6 +1183,14 @@ onBeforeUnmount(() => {
       <!-- Nav / HUD -->
       <div class="h-14 border-b border-[var(--border)] flex items-center justify-between px-6 flex-shrink-0 bg-[var(--bg)] z-10">
         <div class="flex items-center space-x-3 min-w-0">
+          <button
+            @click="goWorkspaces"
+            title="워크스페이스 목록으로"
+            class="mr-2 px-2 py-1 rounded-md text-[11px] border border-[var(--chipBorder)] bg-[var(--sidebar)] hover:bg-[var(--itemHover)] transition-colors flex items-center"
+          >
+            <i class="fa-solid fa-arrow-left mr-1"></i> Workspaces
+          </button>
+          
           <span class="text-sm" :style="{ color: 'var(--muted)' }">HEAD:</span>
           <div class="flex items-center px-3 py-1 rounded-full text-xs font-mono border font-medium bg-[var(--chip)] border-[var(--chipBorder)]">
             <i class="fa-solid fa-code-commit mr-2 text-brand-primary"></i>
