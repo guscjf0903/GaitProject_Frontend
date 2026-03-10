@@ -13,23 +13,18 @@ export class MergesService {
      * fromBranchId → toBranchId로 merge를 수행하고 merge 기록을 생성합니다.
      * @param workspaceId
      * @param requestBody
-     * @param initiatedByUserId
      * @returns ApiResponseMergeResponse OK
      * @throws ApiError
      */
     public static create1(
         workspaceId: string,
         requestBody: MergeCreateRequest,
-        initiatedByUserId?: string,
     ): CancelablePromise<ApiResponseMergeResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/api/workspaces/{workspaceId}/merges',
             path: {
                 'workspaceId': workspaceId,
-            },
-            query: {
-                'initiatedByUserId': initiatedByUserId,
             },
             body: requestBody,
             mediaType: 'application/json',

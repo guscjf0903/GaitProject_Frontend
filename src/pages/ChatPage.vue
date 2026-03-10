@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { BranchesService, CommitsService, MessagesService, OpenAPI } from '../api/generated'
+import { BranchesService, CommitsService, MessagesService, MergesService, OpenAPI } from '../api/generated'
 import { useAuthStore } from '../stores/auth'
 import { streamChatSse } from '../api/sseChatStream'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
@@ -231,6 +231,7 @@ const toastNow = (title: string, message: string, ms = 1600) => {
 // Modals
 const commitModal = reactive({ open: false, message: '' })
 const branchModal = reactive({ open: false, name: '' })
+const mergeModal = reactive({ open: false, fromBranchId: '', toBranchId: '', mergeType: 'SQUASH', notes: '' })
 const commitInputRef = ref<HTMLInputElement | null>(null)
 const branchInputRef = ref<HTMLInputElement | null>(null)
 
@@ -752,6 +753,50 @@ const openBranchModal = () => {
 }
 const closeBranchModal = () => (branchModal.open = false)
 
+const openMergeModal = () => {
+  mergeModal.fromBranchId = props.branchId
+  mergeModal.toBranchId = ''
+  mergeModal.mergeType = 'SQUASH'
+  mergeModal.notes = ''
+  mergeModal.open = true
+}
+const closeMergeModal = () => (mergeModal.open = false)
+
+const merging = ref(false)
+const confirmMerge = () => {
+  if (merging.value) return
+  if (!mergeModal.fromBranchId || !mergeModal.toBranchId) {
+    toastNow('Merge', '병합할 대상 브랜치를 선택해 주세요.')
+    return
+  }
+  if (mergeModal.fromBranchId === mergeModal.toBranchId) {
+    toastNow('Merge', '동일한 브랜치로는 병합할 수 없습니다.')
+    return
+  }
+
+  ;(async () => {
+    try {
+      merging.value = true
+      await MergesService.create1(props.workspaceId, {
+        workspaceId: props.workspaceId,
+        fromBranchId: mergeModal.fromBranchId,
+        toBranchId: mergeModal.toBranchId,
+        mergeType: mergeModal.mergeType as 'SQUASH' | 'DEEP' | 'FAST_FORWARD',
+        notes: mergeModal.notes,
+      })
+      toastNow('Merge', '브랜치 병합이 성공적으로 완료되었습니다.')
+      closeMergeModal()
+      
+      // 병합된 브랜치(toBranch)로 화면 즉시 이동
+      await router.push(`/w/${props.workspaceId}/b/${mergeModal.toBranchId}`)
+    } catch (e: any) {
+      toastNow('Merge', e?.message ?? '병합 실패. 플랜 권한 또는 충돌을 확인하세요.')
+    } finally {
+      merging.value = false
+    }
+  })()
+}
+
 const confirmCommit = () => {
   if (committing.value) return
   const msg = (commitModal.message || '').trim()
@@ -1216,6 +1261,12 @@ onBeforeUnmount(() => {
 
         <div class="flex space-x-2">
           <button
+            @click="openMergeModal"
+            class="px-3 py-1.5 rounded text-xs font-medium border border-[var(--chipBorder)] hover:bg-[var(--itemHover)] transition-colors text-blue-500"
+          >
+            <i class="fa-solid fa-code-merge mr-1.5"></i> Merge
+          </button>
+          <button
             @click="openBranchModal"
             class="px-3 py-1.5 rounded text-xs font-medium border border-[var(--chipBorder)] hover:bg-[var(--itemHover)] transition-colors"
           >
@@ -1425,6 +1476,79 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="mt-3 text-[11px] font-mono" :style="{ color: 'var(--muted)' }">Shortcut: {{ shortcutBranch }}</div>
+        </div>
+      </div>
+
+      <!-- Merge Modal -->
+      <div v-if="mergeModal.open" class="absolute inset-0 z-40 flex items-center justify-center">
+        <div class="absolute inset-0 bg-black/40" @click="closeMergeModal"></div>
+        <div class="relative w-[520px] max-w-[92vw] rounded-2xl border bg-[var(--sidebar)] shadow-2xl p-5" :style="{ borderColor: 'var(--border)' }">
+          <div class="flex items-center justify-between mb-4">
+            <div class="font-semibold"><i class="fa-solid fa-code-merge text-blue-500 mr-2"></i>Merge Branch</div>
+            <button class="text-sm opacity-70 hover:opacity-100" @click="closeMergeModal"><i class="fa-solid fa-xmark"></i></button>
+          </div>
+
+          <div class="space-y-4">
+            <div>
+              <label class="text-xs" :style="{ color: 'var(--muted)' }">Source Branch (from)</label>
+              <select
+                v-model="mergeModal.fromBranchId"
+                class="mt-1 w-full px-3 py-2 rounded-xl border bg-transparent outline-none focus:ring-1 focus:ring-brand-primary"
+                :style="{ borderColor: 'var(--border)', color: 'var(--text)' }"
+              >
+                <option v-for="b in branchList" :key="b.id" :value="b.id" class="bg-[var(--bg)]">{{ b.name }}</option>
+              </select>
+            </div>
+
+            <div class="flex justify-center text-xl text-blue-500"><i class="fa-solid fa-arrow-down"></i></div>
+
+            <div>
+              <label class="text-xs" :style="{ color: 'var(--muted)' }">Target Branch (to)</label>
+              <select
+                v-model="mergeModal.toBranchId"
+                class="mt-1 w-full px-3 py-2 rounded-xl border bg-transparent outline-none focus:ring-1 focus:ring-brand-primary"
+                :style="{ borderColor: 'var(--border)', color: 'var(--text)' }"
+              >
+                <option v-for="b in branchList" :key="b.id" :value="b.id" class="bg-[var(--bg)]">{{ b.name }}</option>
+              </select>
+            </div>
+
+            <div>
+              <label class="text-xs" :style="{ color: 'var(--muted)' }">Merge Type</label>
+              <select
+                v-model="mergeModal.mergeType"
+                class="mt-1 w-full px-3 py-2 rounded-xl border bg-transparent outline-none focus:ring-1 focus:ring-brand-primary"
+                :style="{ borderColor: 'var(--border)', color: 'var(--text)' }"
+              >
+                <option value="SQUASH" class="bg-[var(--bg)]">Squash Merge (단순 결합)</option>
+                <option value="DEEP" class="bg-[var(--bg)]">Deep Merge (AI 지능형 통합 - Master 전용)</option>
+                <option value="FAST_FORWARD" class="bg-[var(--bg)]">Fast Forward</option>
+              </select>
+            </div>
+
+            <div v-if="mergeModal.mergeType === 'DEEP'">
+              <label class="text-xs" :style="{ color: 'var(--muted)' }">AI 지시사항 (선택)</label>
+              <textarea
+                v-model="mergeModal.notes"
+                rows="2"
+                class="mt-1 w-full px-3 py-2 rounded-xl border bg-transparent outline-none focus:ring-1 focus:ring-brand-primary text-sm resize-none"
+                :style="{ borderColor: 'var(--border)', color: 'var(--text)' }"
+                placeholder="예: A 브랜치의 설계를 위주로 B 브랜치를 통합해줘"
+              ></textarea>
+            </div>
+          </div>
+
+          <div class="mt-5 flex justify-end gap-2">
+            <button class="px-3 py-2 text-xs rounded-lg border hover:bg-[var(--itemHover)]" :style="{ borderColor: 'var(--border)' }" @click="closeMergeModal">
+              Cancel
+            </button>
+            <button class="px-3 py-2 text-xs rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition"
+                    :disabled="merging"
+                    @click="confirmMerge">
+              <i v-if="merging" class="fa-solid fa-spinner fa-spin mr-1.5"></i>
+              {{ merging ? 'Merging...' : 'Merge' }}
+            </button>
+          </div>
         </div>
       </div>
     </main>
