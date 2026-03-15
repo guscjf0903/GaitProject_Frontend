@@ -144,12 +144,16 @@ const serverHeadCommitId = ref<string | null>(null)
 const branchList = ref<Array<{ id: string; name: string; baseCommitId?: string | null; headCommitId?: string | null }>>([])
 
 // Commits (Oldest -> Newest)
-const commits = ref<
-  Array<{ hash: string; parentId: string | null; branch: string; branchId?: string; msg: string; time: string; col: number }>
->([])
+type CommitNode = {
+  hash: string; parentId: string | null; mergeParentId?: string | null;
+  isMerge?: boolean; mergeType?: string;
+  branch: string; branchId?: string; msg: string; time: string; col: number;
+  shortSummary?: string | null; longSummary?: string | null;
+}
+const commits = ref<Array<CommitNode>>([])
 
 const commitByHashMap = computed(() => {
-  const map: Record<string, { hash: string; parentId: string | null; branch: string; branchId?: string; msg: string; time: string; col: number }> = {}
+  const map: Record<string, CommitNode> = {}
   commits.value.forEach((c) => {
     map[c.hash] = c
   })
@@ -212,6 +216,7 @@ const headOrder = computed(() => {
 type ChatMsg =
   | { type: 'message'; role: 'user' | 'ai'; text: string; model?: string; messageId?: string; commitId?: string | null; sequence?: number }
   | { type: 'commit'; hash: string; text: string; isWorkingTree?: boolean }
+  | { type: 'merge'; hash: string; text: string; mergeType?: string; shortSummary?: string | null; longSummary?: string | null; expanded?: boolean }
 const messages = ref<ChatMsg[]>([{ type: 'message', role: 'ai', text: 'Ready to work on [main].', model: 'System' }])
 
 // ✅ Snapshot store (hash -> messages snapshot)
@@ -295,6 +300,7 @@ const graphNodes = computed(() =>
       isActive: selectedLineageSet.value.has(c.hash),
       track,
       row: idx,
+      isMerge: c.isMerge === true,
     }
   }),
 )
@@ -309,7 +315,7 @@ const graphPaneRenderWidth = computed(() => {
 })
 
 const graphPaths = computed(() => {
-  const paths: Array<{ d: string; color: string; isActive: boolean }> = []
+  const paths: Array<{ d: string; color: string; isActive: boolean; isMergeEdge: boolean }> = []
   const nodesMap: Record<string, { x: number; y: number; color: string; track: number; row: number }> = {}
   graphNodes.value.forEach((n) => (nodesMap[n.hash] = n))
 
@@ -369,7 +375,39 @@ const graphPaths = computed(() => {
     }
 
     const isActive = !!commit.parentId && selectedLineageSet.value.has(commit.hash) && selectedLineageSet.value.has(commit.parentId)
-    paths.push({ d, color: getBranchColor(commit.branch), isActive })
+    paths.push({ d, color: getBranchColor(commit.branch), isActive, isMergeEdge: false })
+  })
+
+  // Merge parent edges (dashed)
+  commits.value.forEach((commit) => {
+    if (!commit.mergeParentId) return
+    const currNode = nodesMap[commit.hash]
+    const mergeParentNode = nodesMap[commit.mergeParentId]
+    if (!currNode || !mergeParentNode) return
+
+    const startX = mergeParentNode.x
+    const startY = mergeParentNode.y
+    const endX = currNode.x
+    const endY = currNode.y
+
+    const viaTrack = pickViaTrack(mergeParentNode.track, currNode.track, mergeParentNode.row, currNode.row)
+    const viaX = START_X + viaTrack * TRACK_GAP
+    const cp1y = startY + ROW_HEIGHT * 0.55
+    const cp2y = endY - ROW_HEIGHT * 0.45
+
+    let d = `M ${startX} ${startY} `
+    if (startX === endX) {
+      d += `L ${endX} ${endY}`
+    } else if (viaTrack === currNode.track) {
+      d += `C ${startX} ${cp1y}, ${endX} ${cp2y}, ${endX} ${endY}`
+    } else {
+      const midY = (cp1y + cp2y) / 2
+      d += `C ${startX} ${cp1y}, ${viaX} ${cp1y}, ${viaX} ${midY} `
+      d += `L ${viaX} ${cp2y} `
+      d += `C ${viaX} ${cp2y}, ${endX} ${cp2y}, ${endX} ${endY}`
+    }
+
+    paths.push({ d, color: getBranchColor(commit.branch), isActive: false, isMergeEdge: true })
   })
 
   return paths
@@ -458,13 +496,13 @@ const isFutureMessage = (msg: ChatMsg) => {
   // HEAD를 보고 있으면 미래 메시지는 없음
   if (!serverHeadCommitId.value || selectedOrder.value >= headOrder.value) return false
 
-  if (msg.type === 'commit') {
-    if (msg.isWorkingTree) return true
+  if (msg.type === 'commit' || msg.type === 'merge') {
+    if (msg.type === 'commit' && msg.isWorkingTree) return true
     const idx = branchOrderMap.value[msg.hash]
     return typeof idx === 'number' ? idx > selectedOrder.value : false
   }
 
-  if (msg.commitId) {
+  if (msg.type === 'message' && msg.commitId) {
     const idx = branchOrderMap.value[msg.commitId]
     return typeof idx === 'number' ? idx > selectedOrder.value : false
   }
@@ -491,26 +529,65 @@ const focusCommitInChat = (commitHash: string) => {
 
 const buildTimelineRows = (committedRaw: any[], pendingRaw: any[]): ChatMsg[] => {
   const rows: ChatMsg[] = []
-  let lastCommitId: string | null = null
 
+  const messagesByCommit = new Map<string, any[]>()
   for (const m of committedRaw) {
-    const commitId = m?.commitId ? String(m.commitId) : null
-    if (commitId && commitId !== lastCommitId) {
+    const cid = m?.commitId ? String(m.commitId) : null
+    if (cid) {
+      if (!messagesByCommit.has(cid)) messagesByCommit.set(cid, [])
+      messagesByCommit.get(cid)!.push(m)
+    }
+  }
+
+  // Build lineage from HEAD to root, then reverse for chronological order
+  const lineage: string[] = []
+  const visited = new Set<string>()
+  let cur: string | null = currentHead.value
+  while (cur && !visited.has(cur)) {
+    visited.add(cur)
+    lineage.push(cur)
+    cur = commitByHashMap.value[cur]?.parentId ?? null
+  }
+  lineage.reverse()
+
+  // Collect all commitIds that have messages but aren't in the lineage (fallback)
+  const lineageSet = new Set(lineage)
+  const extraCommitIds: string[] = []
+  for (const cid of messagesByCommit.keys()) {
+    if (!lineageSet.has(cid)) extraCommitIds.push(cid)
+  }
+
+  for (const commitHash of [...lineage, ...extraCommitIds]) {
+    const commit = commitByHashMap.value[commitHash]
+    const msgs = messagesByCommit.get(commitHash) || []
+
+    if (commit?.isMerge) {
+      rows.push({
+        type: 'merge',
+        hash: commitHash,
+        text: commit.msg || 'Merged',
+        mergeType: commit.mergeType,
+        shortSummary: commit.shortSummary,
+        longSummary: commit.longSummary,
+      })
+    } else if (msgs.length > 0) {
       rows.push({
         type: 'commit',
-        hash: commitId,
-        text: commitLabel(commitId),
+        hash: commitHash,
+        text: commitLabel(commitHash),
       })
-      lastCommitId = commitId
     }
-    rows.push({
-      type: 'message',
-      role: toUiRole(String(m?.role ?? 'ASSISTANT')),
-      text: String(m?.content ?? ''),
-      messageId: m?.id ? String(m.id) : undefined,
-      commitId,
-      sequence: typeof m?.sequence === 'number' ? m.sequence : undefined,
-    })
+
+    for (const m of msgs) {
+      rows.push({
+        type: 'message',
+        role: toUiRole(String(m?.role ?? 'ASSISTANT')),
+        text: String(m?.content ?? ''),
+        messageId: m?.id ? String(m.id) : undefined,
+        commitId: commitHash,
+        sequence: typeof m?.sequence === 'number' ? m.sequence : undefined,
+      })
+    }
   }
 
   const pending = (pendingRaw ?? []).filter((m: any) => !m?.commitId)
@@ -547,11 +624,16 @@ const appendCommitToGraph = (newHash: string, parentHash: string | null, message
   commits.value.push({
     hash: newHash,
     parentId: parentHash || null,
+    mergeParentId: null,
+    isMerge: false,
+    mergeType: undefined,
     branch: branchName,
     branchId: branchId || props.branchId,
     msg: message,
     time: nowLabel(),
     col: headCommit?.col ?? 0,
+    shortSummary: null,
+    longSummary: null,
   })
 
   currentHead.value = newHash
@@ -781,7 +863,7 @@ const confirmMerge = () => {
         workspaceId: props.workspaceId,
         fromBranchId: mergeModal.fromBranchId,
         toBranchId: mergeModal.toBranchId,
-        mergeType: mergeModal.mergeType as 'SQUASH' | 'DEEP' | 'FAST_FORWARD',
+        mergeType: mergeModal.mergeType as 'SQUASH' | 'DEEP',
         notes: mergeModal.notes,
       })
       toastNow('Merge', '브랜치 병합이 성공적으로 완료되었습니다.')
@@ -997,12 +1079,17 @@ const bootstrapFromServer = async () => {
         return {
           hash: String(c.id),
           parentId: c.parentId ? String(c.parentId) : null,
+          mergeParentId: c.mergeParentId ? String(c.mergeParentId) : null,
+          isMerge: c.isMerge === true,
+          mergeType: c.mergeType ? String(c.mergeType) : undefined,
           branch: branchName,
           branchId: String(c.branchId ?? ''),
           msg: String(c.keyPoint ?? 'COMMIT'),
           time: c.createdAt ? new Date(c.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
           col: branchCol,
-        }
+          shortSummary: c.shortSummary ?? null,
+          longSummary: c.longSummary ?? null,
+        } as CommitNode
       })
 
     commits.value = all
@@ -1110,8 +1197,9 @@ onBeforeUnmount(() => {
               :d="path.d"
               fill="none"
               :stroke="path.color"
-              :stroke-width="path.isActive ? 3.2 : 1.8"
-              :opacity="path.isActive ? 1 : 0.25"
+              :stroke-width="path.isMergeEdge ? 1.5 : (path.isActive ? 3.2 : 1.8)"
+              :opacity="path.isMergeEdge ? 0.45 : (path.isActive ? 1 : 0.25)"
+              :stroke-dasharray="path.isMergeEdge ? '6 4' : 'none'"
               stroke-linecap="round"
               stroke-linejoin="round"
               class="graph-path"
@@ -1129,9 +1217,9 @@ onBeforeUnmount(() => {
               @click="checkoutByHash(node.hash)"
             />
 
-            <!-- Nodes -->
+            <!-- Regular commit nodes -->
             <circle
-              v-for="node in graphNodes"
+              v-for="node in graphNodes.filter(n => !n.isMerge)"
               :key="'n' + node.hash"
               :cx="node.x"
               :cy="node.y"
@@ -1140,6 +1228,22 @@ onBeforeUnmount(() => {
               :fill="currentHead === node.hash ? '#FFFFFF' : 'var(--sidebar)'"
               :stroke="node.color"
               :stroke-width="currentHead === node.hash ? 3.6 : 2.5"
+              :opacity="node.isActive || currentHead === node.hash ? 1 : 0.35"
+              pointer-events="none"
+            />
+            <!-- Merge commit nodes (diamond) -->
+            <rect
+              v-for="node in graphNodes.filter(n => n.isMerge)"
+              :key="'mn' + node.hash"
+              :x="node.x - 4.5"
+              :y="node.y - 4.5"
+              width="9"
+              height="9"
+              :transform="`rotate(45 ${node.x} ${node.y})`"
+              class="node-pop"
+              :fill="currentHead === node.hash ? '#FFFFFF' : 'var(--sidebar)'"
+              :stroke="node.color"
+              :stroke-width="currentHead === node.hash ? 3.2 : 2.2"
               :opacity="node.isActive || currentHead === node.hash ? 1 : 0.35"
               pointer-events="none"
             />
@@ -1341,9 +1445,52 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
+          <!-- Merge Summary Card -->
+          <div
+            v-else-if="msg.type === 'merge'"
+            class="relative py-4 fade-in"
+          >
+            <div class="absolute inset-0 flex items-center">
+              <div class="w-full border-t border-dashed" :style="{ borderColor: isDark ? 'rgba(168,85,247,0.45)' : 'rgba(147,51,234,0.35)' }"></div>
+            </div>
+            <div class="relative flex justify-center">
+              <div
+                class="px-5 py-3 rounded-xl text-xs border bg-[var(--sidebar)] shadow-lg max-w-md"
+                :style="{
+                  borderColor: isDark ? 'rgba(168,85,247,0.5)' : 'rgba(147,51,234,0.4)',
+                  boxShadow: '0 10px 25px ' + (isDark ? 'rgba(0,0,0,0.25)' : 'rgba(0,0,0,0.08)'),
+                }"
+              >
+                <div class="flex items-center gap-2 mb-2">
+                  <i class="fa-solid fa-code-merge text-purple-400"></i>
+                  <span class="font-mono text-[10px] opacity-60">[{{ shortHash(msg.hash) }}]</span>
+                  <span
+                    class="px-2 py-0.5 rounded-full text-[10px] font-medium"
+                    :class="msg.mergeType === 'DEEP' ? 'bg-purple-500/20 text-purple-300' : 'bg-blue-500/20 text-blue-300'"
+                  >{{ msg.mergeType === 'DEEP' ? 'Deep Merge' : 'Squash Merge' }}</span>
+                </div>
+                <div class="font-medium text-sm mb-1" :style="{ color: 'var(--text)' }">{{ msg.text }}</div>
+                <div v-if="msg.shortSummary" class="text-xs opacity-70 leading-relaxed" :style="{ color: 'var(--muted)' }">{{ msg.shortSummary }}</div>
+                <button
+                  v-if="msg.longSummary"
+                  class="mt-2 text-[10px] text-purple-400 hover:text-purple-300 transition-colors flex items-center gap-1"
+                  @click="msg.expanded = !msg.expanded"
+                >
+                  <i :class="msg.expanded ? 'fa-solid fa-chevron-up' : 'fa-solid fa-chevron-down'" class="text-[8px]"></i>
+                  {{ msg.expanded ? '접기' : '상세 보기' }}
+                </button>
+                <div
+                  v-if="msg.expanded && msg.longSummary"
+                  class="mt-2 pt-2 border-t text-xs leading-relaxed whitespace-pre-wrap"
+                  :style="{ borderColor: isDark ? 'rgba(168,85,247,0.25)' : 'rgba(147,51,234,0.15)', color: 'var(--muted)' }"
+                >{{ msg.longSummary }}</div>
+              </div>
+            </div>
+          </div>
+
           <!-- Normal message -->
           <div
-            v-else
+            v-else-if="msg.type === 'message'"
             class="flex w-full fade-in transition-opacity duration-300"
             :data-msg-commit="msg.commitId || undefined"
             :class="[msg.role === 'user' ? 'justify-end' : 'justify-start', isFutureMessage(msg) ? 'opacity-45' : 'opacity-100']"
@@ -1520,13 +1667,18 @@ onBeforeUnmount(() => {
                 class="mt-1 w-full px-3 py-2 rounded-xl border bg-transparent outline-none focus:ring-1 focus:ring-brand-primary"
                 :style="{ borderColor: 'var(--border)', color: 'var(--text)' }"
               >
-                <option value="SQUASH" class="bg-[var(--bg)]">Squash Merge (단순 결합)</option>
-                <option value="DEEP" class="bg-[var(--bg)]">Deep Merge (AI 지능형 통합 - Master 전용)</option>
-                <option value="FAST_FORWARD" class="bg-[var(--bg)]">Fast Forward</option>
+                <option value="SQUASH" class="bg-[var(--bg)]">Squash Merge (저비용 AI 요약 통합)</option>
+                <option value="DEEP" class="bg-[var(--bg)]">Deep Merge (고비용 AI 지능형 통합 - Master 전용)</option>
               </select>
+              <p v-if="mergeModal.mergeType === 'SQUASH'" class="mt-1.5 text-[10px] leading-relaxed opacity-60" :style="{ color: 'var(--muted)' }">
+                AI가 두 브랜치의 요약을 저비용으로 통합합니다. 주요 내용의 간략한 정리가 생성됩니다.
+              </p>
+              <p v-if="mergeModal.mergeType === 'DEEP'" class="mt-1.5 text-[10px] leading-relaxed opacity-60" :style="{ color: 'var(--muted)' }">
+                AI가 원본 대화를 포함하여 겹치는 내용, 보강 포인트, 타임라인, 충돌 분석까지 상세하게 통합합니다. 더 많은 토큰을 사용합니다.
+              </p>
             </div>
 
-            <div v-if="mergeModal.mergeType === 'DEEP'">
+            <div>
               <label class="text-xs" :style="{ color: 'var(--muted)' }">AI 지시사항 (선택)</label>
               <textarea
                 v-model="mergeModal.notes"
