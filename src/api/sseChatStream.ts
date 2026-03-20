@@ -8,6 +8,8 @@ export type SseHandlers = {
   onEvent?: (frame: SseFrame) => void
   onChunk?: (payload: any) => void
   onDone?: (payload?: any) => void
+  onError?: (payload?: any) => void
+  onRagStatus?: (payload?: any) => void
 }
 
 /**
@@ -46,6 +48,7 @@ export async function streamChatSse(options: {
 
   let buffer = ''
   let current: SseFrame = {}
+  let terminalReceived = false
 
   const emit = (frame: SseFrame) => {
     options.handlers?.onEvent?.(frame)
@@ -61,16 +64,44 @@ export async function streamChatSse(options: {
       }
     }
     if (ev === 'ANSWER_DONE') {
+      terminalReceived = true
       try {
         options.handlers?.onDone?.(JSON.parse(frame.data))
       } catch {
         options.handlers?.onDone?.()
       }
     }
+    if (ev === 'RAG_STATUS') {
+      try {
+        options.handlers?.onRagStatus?.(JSON.parse(frame.data))
+      } catch {
+        options.handlers?.onRagStatus?.()
+      }
+    }
+    if (ev === 'ANSWER_ERROR') {
+      terminalReceived = true
+      try {
+        options.handlers?.onError?.(JSON.parse(frame.data))
+      } catch {
+        options.handlers?.onError?.()
+      }
+    }
   }
 
   while (true) {
-    const { value, done } = await reader.read()
+    let value: Uint8Array | undefined
+    let done = false
+    try {
+      const r = await reader.read()
+      value = r.value
+      done = r.done
+    } catch (e) {
+      // 브라우저가 스트림 종료를 네트워크 에러로 보고하는 경우가 있어,
+      // 이미 DONE/ERROR를 받았다면 이를 정상 종료로 간주합니다.
+      if (terminalReceived) break
+      throw e
+    }
+
     if (done) break
 
     buffer += decoder.decode(value, { stream: true })
@@ -114,6 +145,11 @@ export async function streamChatSse(options: {
           break
       }
     }
+  }
+
+  // 스트림이 끝났는데 마지막 빈 줄이 오지 않아 이벤트가 디스패치되지 않는 경우 보강
+  if (current.event || current.data || current.id) {
+    emit(current)
   }
 }
 

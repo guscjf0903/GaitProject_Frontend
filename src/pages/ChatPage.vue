@@ -741,6 +741,7 @@ const send = async () => {
   messages.value.push({ type: 'message', role: 'ai', text: '', commitId: null })
 
   const url = `${OpenAPI.BASE || 'http://localhost:8080'}/api/chat/stream`
+  let doneSeen = false
   try {
     // abort any previous stream
     streamAbort?.abort()
@@ -770,6 +771,7 @@ const send = async () => {
           }
         },
         onDone: (raw) => {
+          doneSeen = true
           streaming.value = false
           streamAbort = null
           saveCurrentHeadSnapshot()
@@ -777,18 +779,35 @@ const send = async () => {
 
           const doneData = raw?.data?.data || {}
           const totalTokens = doneData.totalTokens
+          const ragUsed = doneData.ragUsed === true
           if (typeof totalTokens === 'number') {
-            toastNow('Token Usage', `이번 대화: ${totalTokens} tokens 사용`)
+            const ragLabel = ragUsed ? ' (RAG)' : ''
+            toastNow('Token Usage', `이번 대화: ${totalTokens} tokens 사용${ragLabel}`)
           }
 
           // 백엔드가 AI 메시지를 스스로 저장했으므로 프론트는 렌더링만 마무리하고 목록을 갱신합니다.
           refreshCurrentBranchCommits(branchId)
+        },
+        onRagStatus: (raw) => {
+          const ragData = raw?.data?.data || {}
+          if (ragData.searched && ragData.itemCount > 0) {
+            toastNow('RAG Search', `과거 기록 ${ragData.itemCount}건 검색 (${ragData.searchDurationMs}ms)`, 2500)
+          }
+        },
+        onError: (raw) => {
+          doneSeen = true
+          streaming.value = false
+          streamAbort = null
+          const errData = raw?.data?.data || {}
+          toastNow('Stream', errData?.message ?? '스트리밍 중 오류가 발생했습니다.')
         },
       },
     })
   } catch (e: any) {
     streaming.value = false
     streamAbort = null
+    // DONE/ERROR를 이미 받았다면(= UI는 정상 종료), 브라우저의 종료 에러는 무시합니다.
+    if (doneSeen) return
     const msg = e?.name === 'AbortError' ? '응답 스트리밍을 중단했어요.' : (e?.message ?? 'SSE 스트리밍 실패')
     toastNow('Stream', msg)
   }
