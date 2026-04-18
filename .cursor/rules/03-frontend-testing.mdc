@@ -1,0 +1,45 @@
+---
+description: 프론트엔드 테스트 작성 규칙 및 전략
+globs: "**/*.spec.ts,**/*.test.ts,**/tests/**"
+alwaysApply: false
+---
+
+# Frontend Testing Rules
+
+## 테스트 도구
+- Unit/Component: Vitest + Vue Test Utils
+- E2E: Playwright (계획)
+
+## 테스트 대상 우선순위
+1. Pinia 스토어 로직 (인증, 상태 전환)
+2. 유틸리티 함수 / Composables
+3. 핵심 컴포넌트 (ChatPage 등)
+4. SSE 이벤트 핸들링
+
+## 테스트 네이밍
+- 파일: {대상}.spec.ts (예: auth.spec.ts)
+- 메서드: `it('should {기대결과} when {조건}')`
+
+## 테스트 구조 (AAA)
+```typescript
+describe('useAuthStore', () => {
+  it('should store token on login', () => {
+    // Arrange
+    const store = useAuthStore()
+    
+    // Act
+    store.setToken('test-jwt')
+    
+    // Assert
+    expect(store.token).toBe('test-jwt')
+    expect(localStorage.getItem('gait_access_token')).toBe('test-jwt')
+  })
+})
+```
+
+## API Mock
+- Vitest의 vi.mock()으로 generated 서비스 모킹
+- MSW(Mock Service Worker)는 Integration 테스트에서 사용 검토
+
+## 구체적 시나리오
+docs/testing/test_scenarios.md 참고

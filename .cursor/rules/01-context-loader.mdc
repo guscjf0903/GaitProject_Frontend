@@ -1,0 +1,24 @@
+---
+description: 모든 코딩 작업 시작 전 프로젝트 컨텍스트를 로드하는 규칙
+globs:
+alwaysApply: true
+---
+
+# Context Loading Protocol (Frontend)
+
+모든 문서는 워크스페이스 루트의 **Docs/** 폴더에 통합되어 있다.
+
+## 필수 로드 (항상)
+1. `Docs/agent/COMMON_INSTRUCTIONS.md` → 공통 행동 규약
+2. `Docs/specs/frontend_spec.md` → 페이지/컴포넌트 설계
+
+## 기능 구현 시 추가 로드
+3. `Docs/specs/sse_protocol.md` → SSE 이벤트 처리 (채팅 관련)
+4. `openapi.json` → 백엔드 API 스펙 (API 연동 작업 시)
+
+## 백엔드 참조 필요 시
+5. `Docs/specs/api_contract.md` → API 계약서
+6. `Docs/specs/backend_spec.md` → 비즈니스 로직 이해
+
+## 작업 완료 후 확인
+- API 변경 감지 → npm run fetch:api && npm run generate:api

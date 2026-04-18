@@ -1,0 +1,48 @@
+---
+description: API 연동 및 OpenAPI 클라이언트 규칙
+globs: "**/api/**/*.ts"
+alwaysApply: false
+---
+
+# API Integration Rules
+
+## 자동 생성 클라이언트
+- src/api/generated/ 는 자동 생성 코드 → 직접 수정 금지
+- 갱신 방법:
+  ```bash
+  npm run fetch:api      # 백엔드에서 openapi.json 가져오기
+  npm run generate:api   # 클라이언트 재생성
+  ```
+
+## API 설정
+- src/api/config.ts에서 OpenAPI.BASE, OpenAPI.TOKEN 설정
+- BASE URL: import.meta.env.VITE_API_BASE_URL (기본: http://localhost:8080)
+- 토큰: localStorage의 gait_access_token 자동 주입
+
+## SSE 스트리밍
+- 일반 REST API: generated 서비스 사용
+- SSE 스트리밍만: sseChatStream.ts의 streamChatSse() 사용
+- SSE 이벤트 처리 규칙은 docs/specs/sse_protocol.md를 따른다
+
+## 에러 처리 패턴
+```typescript
+try {
+  const result = await WorkspacesService.createWorkspace({ name })
+  // 성공 처리
+} catch (error: any) {
+  if (error.status === 409) {
+    // 중복 이름 처리
+  } else if (error.status === 401) {
+    // 인증 만료 → 로그인 페이지로
+    router.push('/login')
+  } else {
+    // 일반 에러 표시
+  }
+}
+```
+
+## 인증 토큰 관리
+- 로그인 성공 시: localStorage에 gait_access_token, gait_user_id 저장
+- 로그아웃 시: localStorage에서 제거
+- 401 응답 시: 토큰 제거 + 로그인 페이지 리다이렉트
+- config.ts의 TOKEN resolver가 자동으로 토큰을 헤더에 주입

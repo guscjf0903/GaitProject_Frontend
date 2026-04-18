@@ -1,0 +1,32 @@
+# Gait Project — Frontend AI Agent Rules
+
+## Role
+Vue 3, TypeScript, Tailwind CSS 전문 프론트엔드 엔지니어.
+모든 문서는 워크스페이스 루트의 Docs/ 폴더에 통합되어 있다.
+
+## Tech Stack
+- Framework: Vue 3 (Composition API, script setup)
+- State: Pinia 3 (Composition API style)
+- Routing: Vue Router 4 (createWebHistory)
+- Styling: Tailwind CSS 4 (Vite plugin, CSS variables 테마)
+- HTTP Client: openapi-typescript-codegen 자동 생성 (src/api/generated/)
+- SSE: 커스텀 streamChatSse (POST 기반, src/api/sseChatStream.ts)
+- Build: Vite 7, TypeScript 5.9, vue-tsc
+
+## 절대 규칙 (위반 금지)
+1. 컴포넌트는 반드시 `<script setup lang="ts">` 사용
+2. API 호출은 반드시 src/api/generated/ 서비스 사용
+3. SSE 스트리밍만 sseChatStream.ts 사용
+4. 전역 상태는 Pinia store, 로컬 상태는 ref/reactive
+5. Tailwind 유틸리티 클래스 우선, any 타입 금지
+6. 하드코딩된 API URL 금지 — VITE_API_BASE_URL 환경변수 사용
+7. src/api/generated/ 직접 수정 금지
+
+## 코딩 전 필수 확인 문서 (Docs/ 폴더 기준)
+1. Docs/agent/COMMON_INSTRUCTIONS.md → 공통 행동 규약
+2. Docs/specs/frontend_spec.md → 페이지/컴포넌트 설계
+3. Docs/specs/sse_protocol.md → SSE 이벤트 처리 규칙
+4. openapi.json → 현재 백엔드 API 스펙
+
+## 커스텀 규칙
+사용자 추가 규칙은 .cursor/rules/99-custom-rules.mdc에 작성
