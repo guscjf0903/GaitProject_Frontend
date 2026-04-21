@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
+    "test": "vitest run",
     "preview": "vite preview",
     "fetch:api": "curl -sSf http://localhost:8080/v3/api-docs -o openapi.json",
     "generate:api": "npm run fetch:api && openapi --input openapi.json --output src/api/generated --client fetch --useUnionTypes"
@@ -26,6 +27,7 @@
     "tailwindcss": "^4.1.18",
     "typescript": "~5.9.3",
     "vite": "^7.2.4",
+    "vitest": "^4.1.4",
     "vue-tsc": "^3.1.4"
   }
 }

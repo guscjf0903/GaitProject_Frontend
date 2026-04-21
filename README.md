@@ -1,5 +1,22 @@
-# Vue 3 + TypeScript + Vite
+# GaitProject Frontend
 
-This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+Git 기반 AI 채팅 서비스의 Vue 3 프론트엔드입니다.
 
-Learn more about the recommended Project Setup and IDE Support in the [Vue Docs TypeScript Guide](https://vuejs.org/guide/typescript/overview.html#project-setup).
+프로젝트 문서는 루트 [Docs/README.md](/Users/hyunchuljung/Desktop/sideProject(Gait)/Docs/README.md)에 통합되어 있습니다.
+
+## 실행
+
+```bash
+npm install
+npm run dev
+```
+
+## 확인할 문서
+
+- 현재 상태: [current_review.md](/Users/hyunchuljung/Desktop/sideProject(Gait)/Docs/implementation/current_review.md)
+- 구현 현황: [implementation_status.md](/Users/hyunchuljung/Desktop/sideProject(Gait)/Docs/implementation/implementation_status.md)
+- 프론트 스펙: [frontend_spec.md](/Users/hyunchuljung/Desktop/sideProject(Gait)/Docs/specs/frontend_spec.md)
+
+## 현재 주의점
+
+- `src/pages/ChatPage.vue`가 큰 단일 파일이라 새 기능 추가 전 분리 전략을 먼저 검토하는 것이 좋습니다.
